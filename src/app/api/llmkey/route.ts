@@ -1,4 +1,5 @@
 import { db } from "@/db";
+import { databaseErrorMessage, ensureMythosSchema } from "@/db/ensure-schema";
 import { mythSessions } from "@/db/schema";
 import { envConfiguredKinds, LLM_KINDS } from "@/lib/llm";
 import type { LlmKind } from "@/lib/llm";
@@ -22,6 +23,7 @@ export async function GET(req: Request) {
   const sid = sidFrom(req);
   if (!sid) return Response.json({ error: "sid mancante" }, { status: 400 });
   try {
+    await ensureMythosSchema();
     const [row] = await db.select().from(mythSessions).where(eq(mythSessions.id, sid)).limit(1);
     return Response.json({
       env: envConfiguredKinds(),
@@ -36,7 +38,10 @@ export async function GET(req: Request) {
     });
   } catch (err) {
     console.error("[llmkey] GET fallita", err);
-    return Response.json({ env: [], session: null });
+    return Response.json(
+      { env: envConfiguredKinds(), session: null, error: databaseErrorMessage(err) },
+      { status: 503 }
+    );
   }
 }
 
@@ -74,6 +79,7 @@ export async function POST(req: Request) {
   }
 
   try {
+    await ensureMythosSchema();
     await db
       .insert(mythSessions)
       .values({
@@ -96,7 +102,7 @@ export async function POST(req: Request) {
     return Response.json({ ok: true, keyMask: mask(key) });
   } catch (err) {
     console.error("[llmkey] POST fallita", err);
-    return Response.json({ error: "salvataggio fallito" }, { status: 500 });
+    return Response.json({ error: databaseErrorMessage(err) }, { status: 503 });
   }
 }
 
@@ -104,6 +110,7 @@ export async function DELETE(req: Request) {
   const sid = sidFrom(req);
   if (!sid) return Response.json({ error: "sid mancante" }, { status: 400 });
   try {
+    await ensureMythosSchema();
     await db
       .insert(mythSessions)
       .values({ id: sid })

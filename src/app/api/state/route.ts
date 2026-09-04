@@ -1,4 +1,5 @@
 import { db } from "@/db";
+import { ensureMythosSchema } from "@/db/ensure-schema";
 import { mythEntities, mythPages, mythRelations, mythSessions } from "@/db/schema";
 import type { BoardEntity, EntityRef, MythPage, PersistedState, QueryActionKey, RelationEdge } from "@/lib/types";
 import { eq } from "drizzle-orm";
@@ -13,6 +14,7 @@ function sidFrom(req: Request): string | null {
 }
 
 async function loadState(sid: string): Promise<PersistedState | null> {
+  await ensureMythosSchema();
   const [session] = await db.select().from(mythSessions).where(eq(mythSessions.id, sid)).limit(1);
   if (!session) return null;
   const ents = await db.select().from(mythEntities).where(eq(mythEntities.sessionId, sid));
@@ -77,6 +79,7 @@ export async function PUT(req: Request) {
   const pages = (body.pages ?? []).slice(0, 90);
 
   try {
+    await ensureMythosSchema();
     await db.transaction(async (tx) => {
       await tx
         .insert(mythSessions)
@@ -125,7 +128,13 @@ export async function DELETE(req: Request) {
   const sid = sidFrom(req);
   if (!sid) return Response.json({ error: "sid mancante" }, { status: 400 });
   try {
-    await db.delete(mythSessions).where(eq(mythSessions.id, sid));
+    await ensureMythosSchema();
+    // Conserva myth_sessions e quindi la chiave LLM della sessione.
+    await db.transaction(async (tx) => {
+      await tx.delete(mythEntities).where(eq(mythEntities.sessionId, sid));
+      await tx.delete(mythRelations).where(eq(mythRelations.sessionId, sid));
+      await tx.delete(mythPages).where(eq(mythPages.sessionId, sid));
+    });
     return Response.json({ ok: true });
   } catch (err) {
     console.error("[state] DELETE fallita", err);

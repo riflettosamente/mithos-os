@@ -1,4 +1,4 @@
-import { integer, pgTable, real, serial, text, timestamp } from "drizzle-orm/pg-core";
+import { bigint, integer, pgTable, real, serial, text, timestamp } from "drizzle-orm/pg-core";
 
 export const mythSessions = pgTable("myth_sessions", {
   id: text("id").primaryKey(),
@@ -44,7 +44,8 @@ export const mythPages = pgTable("myth_pages", {
   title: text("title").notNull(),
   body: text("body").notNull(),
   engine: text("engine").notNull().default("?"),
-  at: integer("at").notNull().default(0),
+  // Date.now() è ~1.7e12: INTEGER (max 2.1e9) non è sufficiente.
+  at: bigint("at", { mode: "number" }).notNull().default(0),
   entitiesJson: text("entities_json").notNull().default("[]"),
   relationsJson: text("relations_json").notNull().default("[]"),
 });

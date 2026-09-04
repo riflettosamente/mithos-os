@@ -1,4 +1,5 @@
 import { db } from "@/db";
+import { ensureMythosSchema } from "@/db/ensure-schema";
 import { mythSessions } from "@/db/schema";
 import { queryOracle } from "@/lib/llm";
 import type { LlmKind, UserLlmConfig } from "@/lib/llm";
@@ -28,6 +29,7 @@ const USER_PROVIDERS: LlmKind[] = ["perplexity", "anthropic", "openai", "gemini"
 async function loadUserConfig(sid: string | null): Promise<UserLlmConfig | null> {
   if (!sid || !/^[\w-]{8,64}$/.test(sid)) return null;
   try {
+    await ensureMythosSchema();
     const [row] = await db.select().from(mythSessions).where(eq(mythSessions.id, sid)).limit(1);
     if (!row?.llmKey || !row.llmProvider) return null;
     const provider = row.llmProvider as LlmKind;
