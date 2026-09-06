@@ -299,10 +299,12 @@ export default function MythApp() {
             tone: "info",
             title: "AVVISO DELL'ORACOLO",
             lines: [
-              "NESSUNA CHIAVE LLM RILEVATA NEL SISTEMA.",
+              data.note?.startsWith("Provider LLM")
+                ? "LA CHIAVE È STATA LETTA, MA IL PROVIDER HA RIFIUTATO O NON HA COMPLETATO LA RICHIESTA."
+                : "NESSUNA CHIAVE LLM RILEVATA NEL SISTEMA.",
               data.note ?? "",
               "L'Oracolo procedurale compone comunque ogni passo.",
-              "Configura PERPLEXITY_API_KEY, ANTHROPIC_API_KEY, OPENAI_API_KEY o GEMINI_API_KEY per attivare la ricerca web multilingue in tempo reale.",
+              "Apri File → Configura chiave LLM e controlla provider, API key e ID modello. Se è un problema di configurazione, l'errore dettagliato qui sopra indica provider e modello fallito.",
             ],
           });
         }
@@ -628,7 +630,10 @@ export default function MythApp() {
         open={keyDialog && phase === "ready"}
         sid={sid}
         onClose={() => setKeyDialog(false)}
-        onSaved={() => setEngine("CHIAVE UTENTE · pronta")}
+        onSaved={() => {
+          degradedShown.current = false;
+          setEngine("CHIAVE UTENTE · pronta");
+        }}
       />
 
       <div className="vignette" aria-hidden />

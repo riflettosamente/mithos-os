@@ -110,9 +110,19 @@ export default function TextWindow({
         <div ref={scrollRef} className="sunk pergam scroll90 absolute inset-0 overflow-y-auto p-4 md:p-5">
           {page ? (
             <>
-              <h2 className="mb-1 font-silk text-[13px] leading-snug font-bold tracking-wide text-[#4a2c06]">
-                {page.title}
-              </h2>
+              <div className="mb-2 flex flex-wrap items-center gap-2">
+                <h2 className="font-silk text-[13px] leading-snug font-bold tracking-wide text-[#4a2c06]">
+                  {page.title}
+                </h2>
+                <span
+                  className={`sunk ml-auto inline-flex max-w-full items-center px-2 py-0.5 font-silk text-[8px] tracking-wider uppercase ${
+                    page.engine.includes("OFFLINE") ? "bg-[#f7df9c] text-[#773d00]" : "bg-[#dff5df] text-[#17621c]"
+                  }`}
+                  title={page.engine}
+                >
+                  FONTE: {page.engine.split(" · ")[0]}
+                </span>
+              </div>
               <div className="greek-band mb-3" aria-hidden />
               <RichMyth raw={page.raw} known={known} selected={selected} onEntity={onEntity} />
               <div className="mt-5 flex items-center justify-between gap-2 border-t border-dashed border-[#8a6d3b] pt-2 text-[17px] text-[#6b5730]">
