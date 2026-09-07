@@ -74,25 +74,6 @@ export async function POST(req: Request) {
   if (key.length < 8 || key.length > 300 || /\s/.test(key)) {
     return Response.json({ error: "chiave non valida (8-300 caratteri, senza spazi)" }, { status: 400 });
   }
-
-  const knownProvider = /^sk-or-/i.test(key)
-    ? "openrouter"
-    : /^sk-ant-/i.test(key)
-      ? "anthropic"
-      : /^pplx-/i.test(key)
-        ? "perplexity"
-        : /^AIza/i.test(key)
-          ? "gemini"
-          : /^sk-(?:proj-|svcacct-|admin-)/i.test(key)
-            ? "openai"
-            : null;
-  if (knownProvider && provider !== knownProvider) {
-    return Response.json(
-      { error: `Questa chiave appartiene a ${knownProvider.toUpperCase()}, ma hai selezionato ${provider.toUpperCase()}.` },
-      { status: 400 }
-    );
-  }
-
   if (provider === "custom" && !/^https:\/\//.test(url)) {
     return Response.json({ error: "per l'endpoint personalizzato serve una URL https valida" }, { status: 400 });
   }

@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { CheckCircle2, Eye, EyeOff, KeyRound, Server, Trash2, Wand2, X } from "lucide-react";
+import { CheckCircle2, Eye, EyeOff, KeyRound, Server, Trash2, X } from "lucide-react";
 import { sfx } from "@/lib/sound";
 import { fetchJson } from "@/lib/api";
 
@@ -11,23 +11,13 @@ interface Cfg {
 }
 
 const PROVIDER_OPTIONS: { value: string; label: string }[] = [
-  { value: "openrouter", label: "OpenRouter (routing automatico / :online)" },
-  { value: "openai", label: "OpenAI GPT (web search)" },
   { value: "perplexity", label: "Perplexity (Sonar · ricerca web live)" },
   { value: "anthropic", label: "Anthropic Claude (web search)" },
+  { value: "openai", label: "OpenAI GPT (web search)" },
   { value: "gemini", label: "Google Gemini (google search)" },
+  { value: "openrouter", label: "OpenRouter (:online)" },
   { value: "custom", label: "Endpoint personalizzato OpenAI-compatibile" },
 ];
-
-function detectProvider(apiKey: string): string | null {
-  const value = apiKey.trim();
-  if (/^sk-or-/i.test(value)) return "openrouter";
-  if (/^sk-ant-/i.test(value)) return "anthropic";
-  if (/^pplx-/i.test(value)) return "perplexity";
-  if (/^AIza/i.test(value)) return "gemini";
-  if (/^sk-(?:proj-|svcacct-|admin-|[A-Za-z0-9])/i.test(value)) return "openai";
-  return null;
-}
 
 export default function ApiKeyDialog({
   open,
@@ -41,27 +31,19 @@ export default function ApiKeyDialog({
   onSaved: () => void;
 }) {
   const [cfg, setCfg] = useState<Cfg | null>(null);
-  const [provider, setProvider] = useState("openrouter");
+  const [provider, setProvider] = useState("perplexity");
   const [key, setKey] = useState("");
   const [model, setModel] = useState("");
   const [url, setUrl] = useState("");
   const [show, setShow] = useState(false);
   const [busy, setBusy] = useState(false);
-  const [testing, setTesting] = useState(false);
   const [msg, setMsg] = useState<{ tone: "ok" | "err"; text: string } | null>(null);
 
   useEffect(() => {
     if (!open || !sid) return;
     setMsg(null);
     fetchJson<Cfg>(`/api/llmkey?sid=${encodeURIComponent(sid)}`, undefined, { retries: 3, delayMs: 900 })
-      .then((nextCfg) => {
-        setCfg(nextCfg);
-        if (nextCfg.session) {
-          setProvider(nextCfg.session.provider);
-          setModel(nextCfg.session.model);
-          setUrl(nextCfg.session.url);
-        }
-      })
+      .then(setCfg)
       .catch(() => setCfg({ env: [], session: null }));
   }, [open, sid]);
 
@@ -73,7 +55,7 @@ export default function ApiKeyDialog({
     setMsg(null);
     sfx("click");
     try {
-      const data = await fetchJson<{ ok?: boolean; error?: string; keyMask?: string }>(
+      const data = await fetchJson<{ ok?: boolean; error?: string }>(
         `/api/llmkey?sid=${encodeURIComponent(sid)}`,
         {
           method: "POST",
@@ -83,85 +65,16 @@ export default function ApiKeyDialog({
         { retries: 2, delayMs: 900 }
       );
       if (data.error) throw new Error(data.error);
-      onSaved();
-      setCfg((current) => ({
-        env: current?.env ?? [],
-        session: { provider, keyMask: data.keyMask ?? "••••••••", model, url },
-      }));
-      setMsg({ tone: "ok", text: "CHIAVE SALVATA · VERIFICA DEL PROVIDER IN CORSO…" });
-
-      const diagnostic = await fetchJson<{
-        test?: { ok?: boolean; engine?: string; note?: string | null; reason?: string };
-        error?: string;
-      }>(
-        `/api/llmkey/test?sid=${encodeURIComponent(sid)}`,
-        { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" },
-        { retries: 1, delayMs: 900 }
-      );
-      if (diagnostic.error) throw new Error(diagnostic.error);
-      if (!diagnostic.test?.ok) {
-        sfx("err");
-        setMsg({
-          tone: "err",
-          text: `CHIAVE SALVATA, MA PROVIDER OFFLINE · ${diagnostic.test?.note ?? diagnostic.test?.reason ?? "errore sconosciuto"}`.toUpperCase(),
-        });
-        return;
-      }
-
       sfx("ok");
+      setMsg({ tone: "ok", text: "CHIAVE REGISTRATA — l'Oracolo la userà dalla prossima interrogazione." });
       setKey("");
-      setMsg({ tone: "ok", text: `PROVIDER ONLINE · ${diagnostic.test.engine ?? provider}` });
-      window.setTimeout(() => { onClose(); }, 2200);
+      onSaved();
+      window.setTimeout(() => { onClose(); }, 1400);
     } catch (err) {
       sfx("err");
       setMsg({ tone: "err", text: (err instanceof Error ? err.message : "ERRORE").toUpperCase() });
     } finally {
       setBusy(false);
-    }
-  };
-
-  const testConnection = async () => {
-    if (!sid || testing) return;
-    setTesting(true);
-    setMsg({ tone: "err", text: "PROVA DEL PROVIDER IN CORSO…" });
-    sfx("click");
-    interface TestResponse {
-      source?: string;
-      test?: {
-        ok?: boolean;
-        engine?: string;
-        degraded?: boolean;
-        note?: string | null;
-        reason?: string;
-      };
-      error?: string;
-    }
-    try {
-      const data = await fetchJson<TestResponse>(
-        `/api/llmkey/test?sid=${encodeURIComponent(sid)}`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(key.trim() ? { provider, key: key.trim(), model: model.trim(), url: url.trim() } : {}),
-        },
-        { retries: 2, delayMs: 900 }
-      );
-      if (data.error) throw new Error(data.error);
-      if (data.test?.ok) {
-        sfx("ok");
-        setMsg({ tone: "ok", text: `PROVIDER ONLINE · ${data.test.engine ?? ""}` });
-      } else {
-        sfx("err");
-        setMsg({
-          tone: "err",
-          text: (data.test?.note ?? data.test?.reason ?? "Provider non raggiungibile").toUpperCase(),
-        });
-      }
-    } catch (error) {
-      sfx("err");
-      setMsg({ tone: "err", text: (error instanceof Error ? error.message : "ERRORE DI TEST").toUpperCase() });
-    } finally {
-      setTesting(false);
     }
   };
 
@@ -225,12 +138,7 @@ export default function ApiKeyDialog({
                 className="input90"
                 type={show ? "text" : "password"}
                 value={key}
-                onChange={(e) => {
-                  const value = e.target.value;
-                  setKey(value);
-                  const detected = detectProvider(value);
-                  if (detected) setProvider(detected);
-                }}
+                onChange={(e) => setKey(e.target.value)}
                 placeholder="incolla qui la chiave…"
                 autoComplete="off"
                 spellCheck={false}
@@ -255,13 +163,6 @@ export default function ApiKeyDialog({
               autoComplete="off"
               spellCheck={false}
             />
-            {provider === "openrouter" && (
-              <p className="sunk bg-[#fff4c2] p-2 font-vt text-[17px] leading-snug text-[#4a3400]">
-                Usa una chiave account <b>sk-or-v1-…</b> e un ID modello visibile su openrouter.ai/models.
-                Se non hai accesso alle varianti :online lascia il campo vuoto: l&apos;app proverà automaticamente anche modelli compatibili.
-                Esempi: google/gemini-flash-1.5:online, meta-llama/llama-3.3-70b-instruct:free.
-              </p>
-            )}
 
             {provider === "custom" && (
               <>
@@ -286,20 +187,12 @@ export default function ApiKeyDialog({
             </div>
           )}
 
-          <div className="flex flex-wrap justify-center gap-3 pt-2">
-            <button className="btn90 btn-gold" onClick={save} disabled={busy || testing || key.trim().length < 8}>
+          <div className="flex justify-center gap-3 pt-2">
+            <button className="btn90 btn-gold" onClick={save} disabled={busy || key.trim().length < 8}>
               <KeyRound size={12} /> Salva chiave
             </button>
-            <button
-              className="btn90"
-              onClick={testConnection}
-              disabled={testing || busy}
-              data-tip="Prova la configurazione senza salvarla"
-            >
-              <Wand2 size={12} /> {testing ? "Test in corso…" : "Test connessione"}
-            </button>
             {cfg?.session && (
-              <button className="btn90" onClick={wipe} disabled={busy || testing}>
+              <button className="btn90" onClick={wipe} disabled={busy}>
                 <Trash2 size={12} /> Rimuovi
               </button>
             )}

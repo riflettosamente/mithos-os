@@ -35,49 +35,10 @@ interface ChatMsg {
 
 interface Provider {
   id: string;
-  /** Uno slot può contenere più candidati, ad esempio modelli OpenRouter alternativi. */
-  asks: (() => Promise<string>)[];
+  ask: () => Promise<string>;
 }
 
 const KIND_ENUM = '"divinità" | "titano" | "primordiale" | "eroe" | "creatura" | "luogo" | "oggetto" | "mortale"';
-
-const ORACLE_JSON_SCHEMA = {
-  type: "object",
-  additionalProperties: false,
-  required: ["titolo", "testo", "entita", "relazioni"],
-  properties: {
-    titolo: { type: "string" },
-    testo: { type: "string" },
-    entita: {
-      type: "array",
-      items: {
-        type: "object",
-        additionalProperties: false,
-        required: ["nome", "tipo"],
-        properties: {
-          nome: { type: "string" },
-          tipo: {
-            type: "string",
-            enum: ["divinità", "titano", "primordiale", "eroe", "creatura", "luogo", "oggetto", "mortale"],
-          },
-        },
-      },
-    },
-    relazioni: {
-      type: "array",
-      items: {
-        type: "object",
-        additionalProperties: false,
-        required: ["da", "a", "etichetta"],
-        properties: {
-          da: { type: "string" },
-          a: { type: "string" },
-          etichetta: { type: "string" },
-        },
-      },
-    },
-  },
-} as const;
 
 const ACTION_SPECS: Record<
   QueryActionKey,
@@ -231,33 +192,6 @@ const TIMEOUT = 55_000;
 const sysOf = (msgs: ChatMsg[]) => msgs.find((m) => m.role === "system")?.content ?? "";
 const usrOf = (msgs: ChatMsg[]) => msgs.find((m) => m.role === "user")?.content ?? "";
 
-const REDACT_KEY_RE = /(sk-or-v1-[A-Za-z0-9_-]{8,}|sk-ant-[A-Za-z0-9_-]{8,}|sk-[A-Za-z0-9_-]{16,})/g;
-
-async function errorMessage(res: Response, model?: string): Promise<string> {
-  let detail = "";
-  try {
-    const text = await res.text();
-    const data = JSON.parse(text) as {
-      error?: string | { message?: string };
-      message?: string;
-    };
-    const errorField = data.error;
-    if (typeof errorField === "string") detail = errorField;
-    else if (errorField?.message) detail = errorField.message;
-    else if (typeof data.message === "string") detail = data.message;
-    else detail = text;
-  } catch {
-    /* corpo non leggibile */
-  }
-  const clean = detail
-    .replace(REDACT_KEY_RE, "<chiave>")
-    .replace(/\s+/g, " ")
-    .trim()
-    .slice(0, 220);
-  const modelInfo = model ? ` · modello ${model}` : "";
-  return clean ? `HTTP ${res.status}${modelInfo}: ${clean}` : `HTTP ${res.status}${modelInfo}`;
-}
-
 async function postChat(
   msgs: ChatMsg[],
   url: string,
@@ -270,9 +204,7 @@ async function postChat(
     body: JSON.stringify(body),
     signal: AbortSignal.timeout(TIMEOUT + 15000),
   });
-  if (!res.ok) {
-    throw new Error(await errorMessage(res, typeof body.model === "string" ? body.model : undefined));
-  }
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
   const data = (await res.json()) as Record<string, unknown>;
   const choices = data.choices as { message?: { content?: string } }[] | undefined;
   const content = choices?.[0]?.message?.content;
@@ -280,148 +212,20 @@ async function postChat(
   return content;
 }
 
-/* ------- selezione dinamica del modello OpenRouter ------- */
-
-interface OpenRouterModel {
-  id?: unknown;
-  name?: unknown;
-  supported_parameters?: unknown[];
-  architecture?: {
-    modality?: unknown;
-    input_modalities?: unknown[];
-    output_modalities?: unknown[];
-  };
-  context_length?: unknown;
-  pricing?: { prompt?: unknown; completion?: unknown };
-}
-
-const OPENROUTER_ACCOUNT_DEFAULT = "__account_default__";
-const globalForOpenRouter = globalThis as typeof globalThis & {
-  __mythosOpenRouterCatalog?: Map<string, Promise<OpenRouterModel[]>>;
-};
-
-async function openRouterCatalog(key: string): Promise<OpenRouterModel[]> {
-  if (!globalForOpenRouter.__mythosOpenRouterCatalog) {
-    globalForOpenRouter.__mythosOpenRouterCatalog = new Map();
-  }
-  const cacheKey = key.slice(0, 12);
-  let pending = globalForOpenRouter.__mythosOpenRouterCatalog.get(cacheKey);
-  if (!pending) {
-    pending = (async () => {
-      const res = await fetch("https://openrouter.ai/api/v1/models", {
-        headers: { Authorization: `Bearer ${key}` },
-        signal: AbortSignal.timeout(20_000),
-      });
-      if (!res.ok) throw new Error(await errorMessage(res));
-      const data = (await res.json()) as { data?: OpenRouterModel[] };
-      return Array.isArray(data.data) ? data.data : [];
-    })().catch((error) => {
-      globalForOpenRouter.__mythosOpenRouterCatalog?.delete(cacheKey);
-      throw error as Error;
-    });
-    globalForOpenRouter.__mythosOpenRouterCatalog.set(cacheKey, pending);
-  }
-  return pending;
-}
-
-function openRouterModelScore(model: OpenRouterModel): number {
-  const id = typeof model.id === "string" ? model.id : "";
-  const parameters = Array.isArray(model.supported_parameters)
-    ? model.supported_parameters.map((value) => String(value).toLowerCase())
-    : [];
-  const promptPrice = Number(model.pricing?.prompt ?? Number.POSITIVE_INFINITY);
-  const completionPrice = Number(model.pricing?.completion ?? Number.POSITIVE_INFINITY);
-  let score = 0;
-  // Fallback automatico prudente: prima i modelli gratuiti.
-  if (id.endsWith(":free") || (promptPrice === 0 && completionPrice === 0)) score += 500;
-  else score -= Math.min(200, Math.ceil((promptPrice + completionPrice) * 1_000_000));
-  if (parameters.includes("response_format")) score += 80;
-  if (parameters.includes("structured_outputs") || parameters.includes("json_schema")) score += 60;
-  if (parameters.includes("tools")) score += 45;
-  if (id.includes("gemini")) score += 40;
-  if (id.includes("llama")) score += 28;
-  if (id.includes("qwen")) score += 20;
-  if (id.includes("gpt-oss")) score += 18;
-  if (id.includes("deepseek")) score += 10;
-  const context = Number(model.context_length ?? 0);
-  score += Math.min(20, Math.floor(context / 100_000));
-  return score;
-}
-
-async function chooseOpenRouterModel(key: string, configured?: string): Promise<string[]> {
-  const preferred = configured?.trim() ?? "";
-  // Se non è stato scelto un modello, non inventiamo uno slug: OpenRouter
-  // userà il modello predefinito impostato nell'account.
-  const candidates: string[] = [preferred || OPENROUTER_ACCOUNT_DEFAULT];
-
-  let catalog: OpenRouterModel[] = [];
-  try {
-    catalog = await openRouterCatalog(key);
-  } catch (error) {
-    // Il catalogo è solo un arricchimento: la chat con modello account
-    // default/configurato può funzionare comunque.
-    console.warn("[oracolo] catalogo OpenRouter non raggiungibile", error);
-    return candidates;
-  }
-
-  const textModels = catalog.filter((modelItem) => {
-    const id = typeof modelItem.id === "string" ? modelItem.id : "";
-    const architecture = modelItem.architecture;
-    const modality = String(architecture?.modality ?? "").toLowerCase();
-    const inputs = (architecture?.input_modalities ?? []).map(String).map((v) => v.toLowerCase());
-    const outputs = (architecture?.output_modalities ?? []).map(String).map((v) => v.toLowerCase());
-    return !!id && (
-      modality.includes("text->text") ||
-      (inputs.includes("text") && outputs.includes("text"))
-    );
-  });
-
-  const availableIds = new Set(textModels.map((item) => String(item.id)));
-  if (preferred.endsWith(":online")) {
-    const base = preferred.replace(/:online$/, "");
-    if (availableIds.has(base)) candidates.push(base);
-  }
-
-  candidates.push(
-    ...textModels
-      .slice()
-      .sort((a, b) => openRouterModelScore(b) - openRouterModelScore(a))
-      .map((item) => String(item.id))
-  );
-
-  return [...new Set(candidates)].slice(0, 6);
-}
-
-function httpCategory(statusStart: string, message: string, providerName: string): string {
-  if (statusStart === "401" || statusStart === "403") {
-    return `${providerName}: chiave non valida, non autorizzata o con accesso negato`;
-  }
-  if (statusStart === "404") {
-    return `${providerName}: modello o endpoint non trovato`;
-  }
-  if (statusStart === "402" || statusStart === "429") {
-    return `${providerName}: quota, rate limit o credito provider raggiunto`;
-  }
-  if (/\b(408|502|503|504)\b/.test(statusStart)) {
-    return `${providerName}: servizio temporaneamente non raggiungibile`;
-  }
-  return `${providerName}: ${message}`;
-}
-
 function buildProvider(kind: LlmKind, msgs: ChatMsg[], key: string, model?: string, url?: string): Provider | null {
   switch (kind) {
     case "perplexity":
       return {
         id: "PERPLEXITY SONAR · RICERCA WEB LIVE",
-        asks: [() =>
+        ask: () =>
           postChat(msgs, "https://api.perplexity.ai/chat/completions",
             { Authorization: `Bearer ${key}` },
-            { model: model || "sonar-pro", messages: msgs, temperature: 0.7 })],
+            { model: model || "sonar-pro", messages: msgs, temperature: 0.7 }),
       };
     case "anthropic":
       return {
         id: "ANTHROPIC CLAUDE + WEB SEARCH",
-        asks: [async () => {
+        ask: async () => {
           const res = await fetch("https://api.anthropic.com/v1/messages", {
             method: "POST",
             headers: {
@@ -443,73 +247,40 @@ function buildProvider(kind: LlmKind, msgs: ChatMsg[], key: string, model?: stri
           const text = (data.content ?? []).filter((b) => b.type === "text" && b.text).map((b) => b.text).join("\n");
           if (!text) throw new Error("nessun blocco testo");
           return text;
-        }],
+        },
       };
-    case "openai": {
-      const parseResponses = async (res: Response, modelName: string): Promise<string> => {
-        if (!res.ok) throw new Error(await errorMessage(res, modelName));
-        const data = (await res.json()) as Record<string, unknown>;
-        if (typeof data.output_text === "string" && data.output_text.trim()) return data.output_text;
-        const out = data.output as { type: string; content?: { type: string; text?: string }[] }[] | undefined;
-        const text = (out ?? [])
-          .filter((o) => o.type === "message")
-          .flatMap((o) => o.content ?? [])
-          .filter((c) => c.type === "output_text" && c.text)
-          .map((c) => c.text)
-          .join("\n");
-        if (!text) throw new Error("nessun testo");
-        return text;
-      };
-
-      const callResponses = async (modelName: string, useWebSearch: boolean): Promise<string> => {
-        const res = await fetch("https://api.openai.com/v1/responses", {
-          method: "POST",
-          headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
-          body: JSON.stringify({
-            model: modelName,
-            ...(useWebSearch ? { tools: [{ type: "web_search" }] } : {}),
-            input: msgs.map((m) => ({ role: m.role, content: m.content })),
-            text: {
-              format: {
-                type: "json_schema",
-                name: "mythos_oracle",
-                strict: true,
-                schema: ORACLE_JSON_SCHEMA,
-              },
-            },
-          }),
-          signal: AbortSignal.timeout(TIMEOUT + 30000),
-        });
-        return parseResponses(res, modelName);
-      };
-
-      const preferred = (model || "gpt-4.1").trim();
-      const candidates = [...new Set([preferred, "gpt-4.1", "gpt-4o-mini", "gpt-4.1-mini"])]
-        .flatMap((modelName) => [
-          () => callResponses(modelName, true),
-          () => callResponses(modelName, false),
-          () => postChat(msgs, "https://api.openai.com/v1/chat/completions",
-            { Authorization: `Bearer ${key}` },
-            {
-              model: modelName,
-              messages: msgs,
-              temperature: 0.7,
-              response_format: { type: "json_object" },
-            }),
-          () => postChat(msgs, "https://api.openai.com/v1/chat/completions",
-            { Authorization: `Bearer ${key}` },
-            { model: modelName, messages: msgs, temperature: 0.7 }),
-        ]);
-
+    case "openai":
       return {
-        id: `OPENAI GPT · ${preferred}`,
-        asks: candidates,
+        id: "OPENAI GPT + WEB SEARCH",
+        ask: async () => {
+          const res = await fetch("https://api.openai.com/v1/responses", {
+            method: "POST",
+            headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
+            body: JSON.stringify({
+              model: model || "gpt-4.1",
+              tools: [{ type: "web_search_preview" }],
+              input: msgs.map((m) => ({ role: m.role, content: m.content })),
+            }),
+            signal: AbortSignal.timeout(TIMEOUT + 30000),
+          });
+          if (!res.ok) throw new Error(`HTTP ${res.status}`);
+          const data = (await res.json()) as Record<string, unknown>;
+          if (typeof data.output_text === "string" && data.output_text.trim()) return data.output_text;
+          const out = data.output as { type: string; content?: { type: string; text?: string }[] }[] | undefined;
+          const text = (out ?? [])
+            .filter((o) => o.type === "message")
+            .flatMap((o) => o.content ?? [])
+            .filter((c) => c.type === "output_text" && c.text)
+            .map((c) => c.text)
+            .join("\n");
+          if (!text) throw new Error("nessun testo");
+          return text;
+        },
       };
-    }
     case "gemini":
       return {
         id: "GOOGLE GEMINI + GOOGLE SEARCH",
-        asks: [async () => {
+        ask: async () => {
           const res = await fetch(
             `https://generativelanguage.googleapis.com/v1beta/models/${model || "gemini-2.0-flash"}:generateContent?key=${key}`,
             {
@@ -529,64 +300,23 @@ function buildProvider(kind: LlmKind, msgs: ChatMsg[], key: string, model?: stri
           const text = (data.candidates?.[0]?.content?.parts ?? []).map((p) => p.text ?? "").join("");
           if (!text) throw new Error("nessun testo");
           return text;
-        }],
+        },
       };
-    case "openrouter": {
+    case "openrouter":
       return {
-        id: `OPENROUTER · ${(model || "auto").trim()}`,
-        asks: [async () => {
-          /*
-           * Il modello è scelto al primo uso interrogando il catalogo dei
-           * modelli compatibili con la chiave. Evita di affidarsi a slug
-           * :online o :free che cambiano nel tempo o non sono abilitati.
-           */
-          const candidates = await chooseOpenRouterModel(key, model);
-          const failures: string[] = [];
-          const headers = {
-            Authorization: `Bearer ${key}`,
-            "HTTP-Referer": process.env.OPENROUTER_APP_URL ?? "",
-            "X-OpenRouter-Title": "MYTHOS-OS",
-          };
-
-          for (const candidate of candidates) {
-            const label = candidate === OPENROUTER_ACCOUNT_DEFAULT ? "modello predefinito account" : candidate;
-            const modelField = candidate === OPENROUTER_ACCOUNT_DEFAULT ? {} : { model: candidate };
-            const baseBody = { ...modelField, messages: msgs, temperature: 0.7, max_tokens: 3000 };
-            const attempts: Record<string, unknown>[] = [
-              {
-                ...baseBody,
-                response_format: { type: "json_object" },
-                plugins: [{ id: "web", enabled: true }],
-              },
-              { ...baseBody, response_format: { type: "json_object" } },
-              baseBody,
-            ];
-
-            for (const body of attempts) {
-              try {
-                return await postChat(msgs, "https://openrouter.ai/api/v1/chat/completions", headers, body);
-              } catch (error) {
-                const message = error instanceof Error ? error.message : String(error);
-                failures.push(`${label}: ${message}`);
-                console.warn(`[oracolo] OpenRouter · ${label}: ${message}`);
-                // Una 401 è riferita alla chiave, non al modello/formato.
-                if (/HTTP 401\b/.test(message)) throw new Error(httpCategory("401", message, "OPENROUTER"));
-              }
-            }
-          }
-          const first = failures[0] ?? "nessun errore dettagliato";
-          const firstStatus = /^.*?HTTP (\d{3})/.exec(first)?.[1] ?? "";
-          throw new Error(httpCategory(firstStatus, first, "OPENROUTER"));
-        }],
+        id: "OPENROUTER · MODELLO ONLINE",
+        ask: () =>
+          postChat(msgs, "https://openrouter.ai/api/v1/chat/completions",
+            { Authorization: `Bearer ${key}` },
+            { model: model || "openai/gpt-4o-mini:online", messages: msgs, temperature: 0.7 }),
       };
-    }
     case "custom": {
       if (!url) return null;
       return {
         id: "LLM ENDPOINT PERSONALIZZATO",
-        asks: [() =>
+        ask: () =>
           postChat(msgs, url, { Authorization: `Bearer ${key}` },
-            { model: model || "default", messages: msgs, temperature: 0.7 })],
+            { model: model || "default", messages: msgs, temperature: 0.7 }),
       };
     }
   }
@@ -629,8 +359,7 @@ export async function queryOracle(
   action: QueryActionKey,
   subject?: string,
   subject2?: string,
-  userCfg?: UserLlmConfig | null,
-  includeEnvironmentProviders = true
+  userCfg?: UserLlmConfig | null
 ): Promise<OracleResult> {
   const msgs = buildMessages(action, subject, subject2);
   const errors: string[] = [];
@@ -643,37 +372,31 @@ export async function queryOracle(
         : [userCfg.provider];
     for (const k of kinds) {
       const p = buildProvider(k, msgs, userCfg.key, userCfg.model, userCfg.url);
-      if (p) candidates.push({ id: `${p.id} · CHIAVE UTENTE`, asks: p.asks });
+      if (p) candidates.push({ id: `${p.id} · CHIAVE UTENTE`, ask: p.ask });
     }
   }
-  if (includeEnvironmentProviders) {
-    for (const k of LLM_KINDS) {
-      if (!envHas(k)) continue;
-      const key = ENV_KEYS[k].map(env).find(Boolean)!;
-      const p = buildProvider(k, msgs, key, env(ENV_MODEL[k]), env("ORACLE_LLM_URL"));
-      if (p) candidates.push(p);
-    }
+  for (const k of LLM_KINDS) {
+    if (!envHas(k)) continue;
+    const key = ENV_KEYS[k].map(env).find(Boolean)!;
+    const p = buildProvider(k, msgs, key, env(ENV_MODEL[k]), env("ORACLE_LLM_URL"));
+    if (p) candidates.push(p);
   }
 
   for (const p of candidates) {
-    const slotErrors: string[] = [];
-    for (const ask of p.asks) {
-      try {
-        const raw = await ask();
-        const norm = normalize(extractJson(raw));
-        return { ...norm, engine: p.id, degraded: false };
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : "errore";
-        slotErrors.push(msg);
-        console.error(`[oracolo] tentativo fallito · ${p.id} · ${msg}`);
-      }
+    try {
+      const raw = await p.ask();
+      const norm = normalize(extractJson(raw));
+      return { ...norm, engine: p.id, degraded: false };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "errore";
+      errors.push(`${p.id.split(" ·")[0]}: ${msg}`);
+      console.error(`[oracolo] provider fallito`, errors[errors.length - 1]);
     }
-    errors.push(`${p.id.split(" ·")[0]}: ${slotErrors.join(" → ")}`);
   }
 
   const fallback = kernelQuery(action, subject, subject2);
   if (candidates.length) {
-    fallback.note = `Provider LLM non raggiungibili (${errors.join(" | ") || "errore"}). Verifica sul provider il modello configurato, la compatibilità della chiave e gli endpoint. Kernel procedurale attivato.`;
+    fallback.note = `Provider LLM non raggiungibili (${errors.join(" | ") || "errore"}). Kernel procedurale attivato.`;
   }
   return fallback;
 }
