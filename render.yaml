@@ -1,0 +1,37 @@
+# Render Blueprint — ΜΥΘΟΣ·OS
+# Deploy: renderges lo riconosce automaticamente puntando Blueprint/Repo.
+# In alternativa crea un "Web Service" Node e copia buildCommand/startCommand.
+services:
+  - type: web
+    name: mythos-os
+    runtime: node
+    plan: free
+    region: frankfurt
+    buildCommand: >
+      npm install &&
+      npm run build &&
+      npx esbuild server/index.ts --bundle --platform=node --format=esm
+        --alias:@=./src --outfile=dist/server.mjs
+    startCommand: node dist/server.mjs
+    healthCheckPath: /api/health
+    envVars:
+      # Chiavi provider opzionali: se impostate l'Oracolo le usa in automatico
+      # anche senza configurarle dal menu (come le variabili d'ambiente originali).
+      - key: OPENROUTER_API_KEY
+        sync: false
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: PERPLEXITY_API_KEY
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: GOOGLE_API_KEY
+        sync: false
+      - key: GROQ_API_KEY
+        sync: false
+      # Cartella dati (stato + chiavi di sessione). Su Free è il disco effimero:
+      # per conservare le spedizioni tra i riavvii, collega un Disco persistente.
+      - key: MYTHOS_DATA_DIR
+        value: /opt/render/project/src/data

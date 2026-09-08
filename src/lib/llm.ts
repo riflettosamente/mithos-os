@@ -8,9 +8,9 @@ import type { EntityKind, OracleResult, QueryActionKey } from "./types";
 /*  Senza chiavi -> kernel procedurale di emergenza (mai muto).         */
 /* ================================================================== */
 
-export type LlmKind = "perplexity" | "anthropic" | "openai" | "gemini" | "openrouter" | "custom";
+export type LlmKind = "perplexity" | "anthropic" | "openai" | "gemini" | "openrouter" | "groq" | "custom";
 
-export const LLM_KINDS: LlmKind[] = ["perplexity", "anthropic", "openai", "gemini", "openrouter", "custom"];
+export const LLM_KINDS: LlmKind[] = ["perplexity", "anthropic", "openai", "gemini", "openrouter", "groq", "custom"];
 
 export const LLM_KIND_LABEL: Record<LlmKind, string> = {
   perplexity: "Perplexity Sonar · ricerca web live",
@@ -18,6 +18,7 @@ export const LLM_KIND_LABEL: Record<LlmKind, string> = {
   openai: "OpenAI GPT · web search",
   gemini: "Google Gemini · google search",
   openrouter: "OpenRouter · modello :online",
+  groq: "Groq · inferenza velocissima, free tier",
   custom: "Endpoint personalizzato OpenAI-compatibile",
 };
 
@@ -158,18 +159,99 @@ function buildMessages(action: QueryActionKey, subject?: string, subject2?: stri
 
 /* ------------------------- parsing tollerante ------------------------- */
 
+/* I modelli gratuiti tagliano spesso la risposta a metà JSON (limite di
+ * token di completamento). Invece di gettare TUTTO via — titolo e testo
+ * sono i primi campi e restano integri — chiudiamo strutturalmente la
+ * parte sana e salviamo il salvabile. */
+function closeStructuralJson(chunk: string): string {
+  let inString = false;
+  let escaped = false;
+  const stack: string[] = [];
+  for (let i = 0; i < chunk.length; i++) {
+    const ch = chunk[i];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (ch === "\\") escaped = true;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') inString = true;
+    else if (ch === "{") stack.push("}");
+    else if (ch === "[") stack.push("]");
+    else if (ch === "}" || ch === "]") stack.pop();
+  }
+  let out = chunk.replace(/,\s*$/, "");
+  if (inString) out += '"';
+  while (stack.length) out += stack.pop();
+  return out;
+}
+
+function salvageTruncatedJson(src: string): Record<string, unknown> | null {
+  const start = src.indexOf("{");
+  if (start < 0) return null;
+  const body = src.slice(start);
+
+  /* posizioni "sicure" di taglio: dopo } o ] che chiudono qualcosa, e
+   * prima delle virgole (così da buttare l'ultimo elemento incompleto) */
+  const cuts: number[] = [];
+  const stack: string[] = [];
+  let inString = false;
+  let escaped = false;
+  for (let i = 0; i < body.length; i++) {
+    const ch = body[i];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (ch === "\\") escaped = true;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') inString = true;
+    else if (ch === "{") stack.push("}");
+    else if (ch === "[") stack.push("]");
+    else if (ch === "}" || ch === "]") {
+      stack.pop();
+      if (stack.length > 0) cuts.push(i + 1);
+    } else if (ch === ",") {
+      cuts.push(i);
+    }
+  }
+
+  const candidates = [body.length, ...cuts].sort((a, b) => b - a);
+  const seen = new Set<number>();
+  for (const n of candidates) {
+    if (n <= start + 2 || seen.has(n)) continue;
+    seen.add(n);
+    try {
+      const v = JSON.parse(closeStructuralJson(body.slice(0, n)));
+      if (v && typeof v === "object" && !Array.isArray(v)) {
+        return v as Record<string, unknown>;
+      }
+    } catch {
+      /* ancora troncato male: si scende a un taglio più corto */
+    }
+  }
+  return null;
+}
+
 function extractJson(raw: string): Record<string, unknown> {
   let s = raw.trim();
   s = s.replace(/^```(?:json)?/i, "").replace(/```$/i, "").trim();
   const i = s.indexOf("{");
   const j = s.lastIndexOf("}");
-  if (i < 0 || j <= i) throw new Error("nessun JSON nella risposta");
-  s = s.slice(i, j + 1);
+  if (i < 0) throw new Error("nessun JSON nella risposta");
+  const core = j > i ? s.slice(i, j + 1) : s.slice(i);
   try {
-    return JSON.parse(s) as Record<string, unknown>;
+    return JSON.parse(core) as Record<string, unknown>;
   } catch {
-    const repaired = s.replace(/[\r\n\t]+/g, " ");
+    /* primo tentativo fallito */
+  }
+  try {
+    const repaired = core.replace(/[\r\n\t]+/g, " ");
     return JSON.parse(repaired) as Record<string, unknown>;
+  } catch {
+    const salvaged = salvageTruncatedJson(core);
+    if (salvaged) return salvaged;
+    throw new Error("JSON malformato nella risposta");
   }
 }
 
@@ -259,7 +341,7 @@ async function errorMessage(res: Response, model?: string): Promise<string> {
 }
 
 async function postChat(
-  msgs: ChatMsg[],
+  _msgs: ChatMsg[],
   url: string,
   headers: Record<string, string>,
   body: Record<string, unknown>
@@ -300,6 +382,13 @@ const globalForOpenRouter = globalThis as typeof globalThis & {
   __mythosOpenRouterCatalog?: Map<string, Promise<OpenRouterModel[]>>;
 };
 
+/* Flag runtime: diventa true al primo "Insufficient credits" del provider,
+ * così le query successive saltano il tentativo con plugin web (a pagamento)
+ * e non bruciano una richiesta della quota gratuita. */
+const globalForOpenRouterFlags = globalThis as typeof globalThis & {
+  __mythosOrNoCredits?: boolean;
+};
+
 async function openRouterCatalog(key: string): Promise<OpenRouterModel[]> {
   if (!globalForOpenRouter.__mythosOpenRouterCatalog) {
     globalForOpenRouter.__mythosOpenRouterCatalog = new Map();
@@ -326,42 +415,63 @@ async function openRouterCatalog(key: string): Promise<OpenRouterModel[]> {
 
 function openRouterModelScore(model: OpenRouterModel): number {
   const id = typeof model.id === "string" ? model.id : "";
+  if (!id) return -999999;
+
+  // La famiglia openrouter/* sono router e strumenti interni (bodybuilder,
+  // fusion, auto, free...), non modelli chat chiamabili da noi: i free
+  // veri li classifichiamo noi per punteggio.
+  if (id.startsWith("openrouter/")) return -999999;
+
+  const promptPrice = Number(model.pricing?.prompt ?? Number.POSITIVE_INFINITY);
+  const completionPrice = Number(model.pricing?.completion ?? Number.POSITIVE_INFINITY);
+
+  // Prezzi negativi (-1) indicano router o strumenti speciali OpenRouter: escludili
+  if (promptPrice < 0 || completionPrice < 0) return -999999;
+
+  let score = 0;
+  const isFree = id.endsWith(":free") || (promptPrice === 0 && completionPrice === 0);
+  if (isFree) {
+    score += 10000;
+  } else {
+    score -= Math.max(0, Math.ceil((promptPrice + completionPrice) * 1_000_000));
+  }
+
   const parameters = Array.isArray(model.supported_parameters)
     ? model.supported_parameters.map((value) => String(value).toLowerCase())
     : [];
-  const promptPrice = Number(model.pricing?.prompt ?? Number.POSITIVE_INFINITY);
-  const completionPrice = Number(model.pricing?.completion ?? Number.POSITIVE_INFINITY);
-  let score = 0;
-  // Fallback automatico prudente: prima i modelli gratuiti.
-  if (id.endsWith(":free") || (promptPrice === 0 && completionPrice === 0)) score += 500;
-  else score -= Math.min(200, Math.ceil((promptPrice + completionPrice) * 1_000_000));
   if (parameters.includes("response_format")) score += 80;
   if (parameters.includes("structured_outputs") || parameters.includes("json_schema")) score += 60;
   if (parameters.includes("tools")) score += 45;
+  if (id.includes("gemma")) score += 50;
+  if (id.includes("nemotron")) score += 40;
   if (id.includes("gemini")) score += 40;
-  if (id.includes("llama")) score += 28;
+  if (id.includes("llama")) score += 30;
   if (id.includes("qwen")) score += 20;
   if (id.includes("gpt-oss")) score += 18;
   if (id.includes("deepseek")) score += 10;
+  // I modelli "reasoning" di nuova generazione consumano i token di risposta
+  // nel ragionamento e lasciano il contenuto vuoto: penalizzali. I "preview"
+  // sono distribuzioni instabili che svaniscono da un giorno all'altro.
+  if (id.includes("reasoning")) score -= 150;
+  if (id.includes("preview")) score -= 100;
   const context = Number(model.context_length ?? 0);
   score += Math.min(20, Math.floor(context / 100_000));
   return score;
 }
 
 async function chooseOpenRouterModel(key: string, configured?: string): Promise<string[]> {
-  const preferred = configured?.trim() ?? "";
-  // Se non è stato scelto un modello, non inventiamo uno slug: OpenRouter
-  // userà il modello predefinito impostato nell'account.
-  const candidates: string[] = [preferred || OPENROUTER_ACCOUNT_DEFAULT];
+  const rawPreferred = configured?.trim() ?? "";
+  const isExplicit =
+    rawPreferred &&
+    rawPreferred.toLowerCase() !== "auto" &&
+    rawPreferred !== OPENROUTER_ACCOUNT_DEFAULT;
 
   let catalog: OpenRouterModel[] = [];
   try {
     catalog = await openRouterCatalog(key);
   } catch (error) {
-    // Il catalogo è solo un arricchimento: la chat con modello account
-    // default/configurato può funzionare comunque.
     console.warn("[oracolo] catalogo OpenRouter non raggiungibile", error);
-    return candidates;
+    return isExplicit ? [rawPreferred] : [];
   }
 
   const textModels = catalog.filter((modelItem) => {
@@ -370,26 +480,124 @@ async function chooseOpenRouterModel(key: string, configured?: string): Promise<
     const modality = String(architecture?.modality ?? "").toLowerCase();
     const inputs = (architecture?.input_modalities ?? []).map(String).map((v) => v.toLowerCase());
     const outputs = (architecture?.output_modalities ?? []).map(String).map((v) => v.toLowerCase());
-    return !!id && (
-      modality.includes("text->text") ||
-      (inputs.includes("text") && outputs.includes("text"))
+    return (
+      !!id &&
+      (modality.includes("text->text") ||
+        (inputs.includes("text") && outputs.includes("text")))
     );
   });
 
   const availableIds = new Set(textModels.map((item) => String(item.id)));
-  if (preferred.endsWith(":online")) {
-    const base = preferred.replace(/:online$/, "");
-    if (availableIds.has(base)) candidates.push(base);
+  const ranked = textModels
+    .filter((m) => openRouterModelScore(m) > 0)
+    .sort((a, b) => openRouterModelScore(b) - openRouterModelScore(a))
+    .map((item) => String(item.id));
+  const freeRanked = ranked.filter((id) => id.endsWith(":free"));
+
+  const candidates: string[] = [];
+  if (isExplicit) {
+    candidates.push(rawPreferred);
+    if (rawPreferred.endsWith(":online")) {
+      const base = rawPreferred.replace(/:online$/, "");
+      if (availableIds.has(base)) candidates.push(base);
+    }
+    /* Spalla d'emergenza: se il modello scelto è giù/quota finita, prova
+       gli altri free (mai il "default account", che può essere rotto). */
+    candidates.push(...freeRanked);
+  } else {
+    /* Auto: solo il catalogo rankato, con i free in testa. */
+    candidates.push(...ranked);
   }
-
-  candidates.push(
-    ...textModels
-      .slice()
-      .sort((a, b) => openRouterModelScore(b) - openRouterModelScore(a))
-      .map((item) => String(item.id))
-  );
-
   return [...new Set(candidates)].slice(0, 6);
+}
+
+/* ----------------------- selezione dinamica Groq ----------------------- */
+
+interface GroqCatalogModel {
+  id?: unknown;
+  active?: unknown;
+  context_window?: unknown;
+}
+
+const globalForGroq = globalThis as typeof globalThis & {
+  __mythosGroqCatalog?: Map<string, Promise<GroqCatalogModel[]>>;
+};
+
+async function groqCatalog(key: string): Promise<GroqCatalogModel[]> {
+  if (!globalForGroq.__mythosGroqCatalog) {
+    globalForGroq.__mythosGroqCatalog = new Map();
+  }
+  const cacheKey = key.slice(0, 12);
+  let pending = globalForGroq.__mythosGroqCatalog.get(cacheKey);
+  if (!pending) {
+    pending = (async () => {
+      const res = await fetch("https://api.groq.com/openai/v1/models", {
+        headers: { Authorization: `Bearer ${key}` },
+        signal: AbortSignal.timeout(20_000),
+      });
+      if (!res.ok) throw new Error(await errorMessage(res));
+      const data = (await res.json()) as { data?: GroqCatalogModel[] };
+      return Array.isArray(data.data) ? data.data : [];
+    })().catch((error) => {
+      globalForGroq.__mythosGroqCatalog?.delete(cacheKey);
+      throw error as Error;
+    });
+    globalForGroq.__mythosGroqCatalog.set(cacheKey, pending);
+  }
+  return pending;
+}
+
+function groqModelScore(id: string, contextWindow: number): number {
+  const l = id.toLowerCase();
+  // Non modelli chat: audio, moderazione, sistemi agentici con formato proprio
+  if (l.includes("whisper") || l.includes("tts") || l.includes("safeguard") || l.includes("guard")) return -100;
+  if (l.startsWith("groq/compound")) return -50;
+  let s = 50;
+  /* Priorita alla capacita free (token/minuto): l Oracolo chiede ~1500 token
+     a risposta;.i modelli con tetto piccolo (preview qwen3.6, 1000 OTPM)
+     vanno in tilt anche se piu "intelligenti". */
+  if (l.includes("llama-4-scout")) s += 85;      // free ~30K TPM
+  if (l.includes("llama-4-maverick")) s += 75;
+  if (l.includes("gpt-oss-120b")) s += 80;        // free ~8K TPM
+  if (l.includes("llama-3.3-70b")) s += 70;       // free ~12K TPM (se ancora vivo)
+  if (l.includes("kimi")) s += 55;
+  if (l.includes("gpt-oss-20b")) s += 40;
+  if (l.includes("gemma")) s += 35;
+  if (l.includes("qwen")) s += 25;
+  if (l.includes("qwen3.6")) s -= 50;             // preview con tetto free irrisorio per testi lunghi
+  if (/7\d?0b/.test(l) || l.includes("32b")) s += 10;
+  s += Math.min(15, Math.floor(contextWindow / 60_000));
+  return s;
+}
+
+async function chooseGroqModel(key: string, configured?: string): Promise<string[]> {
+  const explicit = (configured ?? "").trim();
+  const out: string[] = explicit ? [explicit] : [];
+  try {
+    const catalog = await groqCatalog(key);
+    const ranked = catalog
+      .map((item) => ({
+        id: typeof item.id === "string" ? item.id : "",
+        active: item.active !== false,
+        ctx: Number(item.context_window ?? 0),
+      }))
+      .filter((item) => !!item.id && item.active)
+      .map((item) => ({ ...item, score: groqModelScore(item.id, item.ctx) }))
+      .filter((item) => item.score > 0)
+      .sort((a, b) => b.score - a.score)
+      .map((item) => item.id);
+    out.push(...ranked);
+  } catch (error) {
+    console.warn("[oracolo] catalogo Groq non raggiungibile", error);
+    /* catalogo irraggiungibile: spie con i modelli della produzione nota */
+    out.push(
+      "openai/gpt-oss-120b",
+      "llama-3.3-70b-versatile",
+      "meta-llama/llama-4-scout-17b-16e-instruct",
+      "qwen/qwen3-32b",
+    );
+  }
+  return [...new Set(out)].slice(0, 5);
 }
 
 function httpCategory(statusStart: string, message: string, providerName: string): string {
@@ -417,6 +625,69 @@ function buildProvider(kind: LlmKind, msgs: ChatMsg[], key: string, model?: stri
           postChat(msgs, "https://api.perplexity.ai/chat/completions",
             { Authorization: `Bearer ${key}` },
             { model: model || "sonar-pro", messages: msgs, temperature: 0.7 })],
+      };
+    case "groq":
+      return {
+        id: `GROQ LPU · ${(model || "auto").trim()}`,
+        asks: [async () => {
+          /* Groq ritira spesso i modelli (vedi deprecazioni Llama del 2026):
+             invece di nomi scritti nel codice, interroghiamo il catalogo live
+             con la chiave dell'utente e scegliamo i migliori attivi. */
+          const candidates = await chooseGroqModel(key, model);
+          const headers = { Authorization: `Bearer ${key}` };
+          const failures: string[] = [];
+          const url = "https://api.groq.com/openai/v1/chat/completions";
+          /* 2000 token bastano al JSON epico (testo ~700 + entità/relazioni)
+             e passano più in fretta i tetti free di token al minuto. */
+          const baseBody = { messages: msgs, temperature: 0.7, max_completion_tokens: 2000 };
+          let retryUsed = false;
+
+          for (const candidateModel of candidates) {
+            /* include_reasoning:false impedisce ai modelli gpt-oss di bruciare
+               i token di completamento nel ragionamento interno. */
+            const attempts: Record<string, unknown>[] = [
+              { ...baseBody, model: candidateModel, include_reasoning: false, response_format: { type: "json_object" } },
+              { ...baseBody, model: candidateModel, include_reasoning: false },
+              { ...baseBody, model: candidateModel },
+            ];
+            for (const body of attempts) {
+              try {
+                return await postChat(msgs, url, headers, body);
+              } catch (error) {
+                const message = error instanceof Error ? error.message : String(error);
+                failures.push(`${candidateModel}: ${message}`);
+                console.warn(`[oracolo] Groq · ${candidateModel}: ${message}`);
+                if (/HTTP 401\b/.test(message)) throw new Error(httpCategory("401", message, "GROQ"));
+                /* 429 transitorio di minuto ("riprova tra N secondi"): se la
+                   pausa e breve la onoriamo UNA volta, attenuando l'attesa
+                   massima sotto accettabile (lo spinner retro copre bene). */
+                const waitMatch = /try again in (\d+(?:\.\d+)?)s/i.exec(message);
+                if (!retryUsed && waitMatch) {
+                  const waitMs = Math.ceil(Number(waitMatch[1]) * 1000) + 600;
+                  if (waitMs <= 32_000) {
+                    retryUsed = true;
+                    console.warn(`[oracolo] Groq · riprovo tra ${Number(waitMatch[1]).toFixed(1)}s (limite al minuto)`);
+                    await new Promise((resolve) => setTimeout(resolve, waitMs));
+                    try {
+                      return await postChat(msgs, url, headers, body);
+                    } catch (retryError) {
+                      const retryMessage = retryError instanceof Error ? retryError.message : String(retryError);
+                      failures.push(`${candidateModel} (dopo attesa): ${retryMessage}`);
+                      console.warn(`[oracolo] Groq · retry ${candidateModel}: ${retryMessage}`);
+                      if (/HTTP 401\b/.test(retryMessage)) throw new Error(httpCategory("401", retryMessage, "GROQ"));
+                      /* Se pure dopo l'attesa il modello resta saturo, il ciclo
+                         prosegue con gli altri candidati (i limiti al minuto
+                         sono per singolo modello, non per l'account intero). */
+                    }
+                  }
+                }
+              }
+            }
+          }
+          const first = failures[0] ?? "nessun errore dettagliato";
+          const firstStatus = /^.*?HTTP (\d{3})/.exec(first)?.[1] ?? "";
+          throw new Error(httpCategory(firstStatus, first, "GROQ"));
+        }],
       };
     case "anthropic":
       return {
@@ -551,13 +822,19 @@ function buildProvider(kind: LlmKind, msgs: ChatMsg[], key: string, model?: stri
           for (const candidate of candidates) {
             const label = candidate === OPENROUTER_ACCOUNT_DEFAULT ? "modello predefinito account" : candidate;
             const modelField = candidate === OPENROUTER_ACCOUNT_DEFAULT ? {} : { model: candidate };
-            const baseBody = { ...modelField, messages: msgs, temperature: 0.7, max_tokens: 3000 };
+            /* reasoning:exclude evita che i modelli "a ragionamento" brucino i token
+               nel pensiero interno e lascino il contenuto della risposta vuoto. */
+            const baseBody = { ...modelField, messages: msgs, temperature: 0.7, max_tokens: 3000, reasoning: { exclude: true } };
+            /* Plugin web = a pagamento: account che ha gia risposto
+               "Insufficient credits" lo salta (fa risparmiare 1 richiesta
+               a query, decisivo con quota free ~50/giorno). */
+            const noCredit = globalForOpenRouterFlags.__mythosOrNoCredits === true;
             const attempts: Record<string, unknown>[] = [
-              {
+              ...(noCredit ? [] : [{
                 ...baseBody,
                 response_format: { type: "json_object" },
                 plugins: [{ id: "web", enabled: true }],
-              },
+              }]),
               { ...baseBody, response_format: { type: "json_object" } },
               baseBody,
             ];
@@ -571,6 +848,18 @@ function buildProvider(kind: LlmKind, msgs: ChatMsg[], key: string, model?: stri
                 console.warn(`[oracolo] OpenRouter · ${label}: ${message}`);
                 // Una 401 è riferita alla chiave, non al modello/formato.
                 if (/HTTP 401\b/.test(message)) throw new Error(httpCategory("401", message, "OPENROUTER"));
+                // Account senza crediti: dal prossimo tentativo salta il plugin web.
+                if (/never purchased credits|insufficient credits/i.test(message)) {
+                  globalForOpenRouterFlags.__mythosOrNoCredits = true;
+                }
+                // La quota free giornaliera e un limite DI ACCOUNT: identico
+                // su ogni modello free. Stop immediato con guida: inutile e
+                // controproducente insistere sugli altri ~17 tentativi.
+                if (/free-models-per-day/i.test(message)) {
+                  throw new Error(
+                    "OPENROUTER: quota gratuita giornaliera esaurita. Si ripristina da sola a mezzanotte UTC. Per sbloccarla subito: aggiungi 10 crediti su openrouter.ai/settings/credits, oppure nel frattempo usa il provider GEMINI (chiave gratuita su aistudio.google.com, 1500 richieste al giorno)",
+                  );
+                }
               }
             }
           }
@@ -605,11 +894,13 @@ const ENV_KEYS: Record<LlmKind, string[]> = {
   openai: ["OPENAI_API_KEY"],
   gemini: ["GEMINI_API_KEY", "GOOGLE_API_KEY"],
   openrouter: ["OPENROUTER_API_KEY"],
+  groq: ["GROQ_API_KEY"],
   custom: ["ORACLE_LLM_KEY"],
 };
 const ENV_MODEL: Record<LlmKind, string> = {
   perplexity: "PERPLEXITY_MODEL", anthropic: "ANTHROPIC_MODEL", openai: "OPENAI_MODEL",
-  gemini: "GEMINI_MODEL", openrouter: "OPENROUTER_MODEL", custom: "ORACLE_LLM_MODEL",
+  gemini: "GEMINI_MODEL", openrouter: "OPENROUTER_MODEL", groq: "GROQ_MODEL",
+  custom: "ORACLE_LLM_MODEL",
 };
 
 export function envHas(kind: LlmKind): boolean {

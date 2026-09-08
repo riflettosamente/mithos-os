@@ -12,6 +12,7 @@ interface Cfg {
 
 const PROVIDER_OPTIONS: { value: string; label: string }[] = [
   { value: "openrouter", label: "OpenRouter (routing automatico / :online)" },
+  { value: "groq", label: "Groq (LPU velocissima · free tier generoso)" },
   { value: "openai", label: "OpenAI GPT (web search)" },
   { value: "perplexity", label: "Perplexity (Sonar · ricerca web live)" },
   { value: "anthropic", label: "Anthropic Claude (web search)" },
@@ -25,6 +26,7 @@ function detectProvider(apiKey: string): string | null {
   if (/^sk-ant-/i.test(value)) return "anthropic";
   if (/^pplx-/i.test(value)) return "perplexity";
   if (/^AIza/i.test(value)) return "gemini";
+  if (/^gsk_/i.test(value)) return "groq";
   if (/^sk-(?:proj-|svcacct-|admin-|[A-Za-z0-9])/i.test(value)) return "openai";
   return null;
 }
@@ -251,7 +253,7 @@ export default function ApiKeyDialog({
               type="text"
               value={model}
               onChange={(e) => setModel(e.target.value)}
-              placeholder={provider === "perplexity" ? "sonar-pro" : provider === "anthropic" ? "claude-sonnet-4-5" : provider === "openai" ? "gpt-4.1" : provider === "gemini" ? "gemini-2.0-flash" : provider === "openrouter" ? "openai/gpt-4o-mini:online" : "nome-modello"}
+              placeholder={provider === "perplexity" ? "sonar-pro" : provider === "anthropic" ? "claude-sonnet-4-5" : provider === "openai" ? "gpt-4.1" : provider === "gemini" ? "gemini-2.5-flash" : provider === "openrouter" ? "google/gemma-4-31b-it:free" : provider === "groq" ? "lascia vuoto: scelta auto dal catalogo" : "nome-modello"}
               autoComplete="off"
               spellCheck={false}
             />
