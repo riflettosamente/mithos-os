@@ -7,11 +7,8 @@ services:
     runtime: node
     plan: free
     region: frankfurt
-    buildCommand: >
-      npm install &&
-      npm run build &&
-      npx esbuild server/index.ts --bundle --platform=node --format=esm
-        --alias:@=./src --outfile=dist/server.mjs
+    # build compila anche il bundle del server (vite build && esbuild ...)
+    buildCommand: npm install && npm run build
     startCommand: node dist/server.mjs
     healthCheckPath: /api/health
     envVars:
