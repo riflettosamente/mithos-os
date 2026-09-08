@@ -237,7 +237,7 @@ export default function MythApp() {
 
   /* ------------------------- interrogazione ------------------------- */
   const runQuery = useCallback(
-    async (action: QueryActionKey, a?: string, b?: string) => {
+    async (action: QueryActionKey, a?: string, b?: string, opts?: { regenerateKernelOpening?: boolean }) => {
       /*
        * Il ref è aggiornato subito, prima del prossimo render: un doppio
        * click non può avviare due richieste concorrenti. `loading` resta
@@ -286,6 +286,22 @@ export default function MythApp() {
         if ((newEntityCount > 0 || added > 0) && !flipped) setPulse(true);
 
         setPages((prev) => {
+          if (opts?.regenerateKernelOpening) {
+            /* chiave appena inserita: se PASSO 01 e ancora una overture del
+               kernel procedurale E l'Oracolo ha davvero risposto (non degradato),
+               sostituisci il passo iniziale SENZA spostare la posizione di lettura */
+            if (
+              prev.length > 0 &&
+              prev[0].action === "opening" &&
+              prev[0].engine.includes("KERNEL") &&
+              !data.degraded
+            ) {
+              const replaced = [...prev];
+              replaced[0] = page;
+              return replaced.slice(-MAX_HISTORY);
+            }
+            return prev; // niente riscrittura: overture gia viva o oracolo ancora muto
+          }
           const truncated = prev.slice(0, idxRef.current + 1);
           const merged = [...truncated, page].slice(-MAX_HISTORY);
           setIdx(merged.length - 1);
@@ -633,6 +649,12 @@ export default function MythApp() {
         onSaved={() => {
           degradedShown.current = false;
           setEngine("CHIAVE UTENTE · pronta");
+          /* chiave appena inserita: se PASSO 01 e ancora l'overture scritta
+             dal kernel procedurale (spedizione iniziata senza chiave),
+             la rigeneriamo con l'Oracolo LLM appena entrato in funzione */
+          if (pages[0]?.action === "opening" && pages[0].engine.includes("KERNEL")) {
+            void runQuery("opening", undefined, undefined, { regenerateKernelOpening: true });
+          }
         }}
       />
 
