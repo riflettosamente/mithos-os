@@ -28,6 +28,11 @@ services:
         sync: false
       - key: GROQ_API_KEY
         sync: false
+      # Fallback gratuito: Workers AI (10.000 Neurons/giorno)
+      - key: CLOUDFLARE_API_TOKEN
+        sync: false
+      - key: CLOUDFLARE_ACCOUNT_ID
+        sync: false
       # Cartella dati (stato + chiavi di sessione). Su Free è il disco effimero:
       # per conservare le spedizioni tra i riavvii, collega un Disco persistente.
       - key: MYTHOS_DATA_DIR

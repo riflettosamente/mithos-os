@@ -29,6 +29,36 @@ if (typeof proc !== "object" || proc === null) {
 } else if (typeof (proc as { env?: unknown }).env !== "object") {
   (proc as { env?: unknown }).env = {};
 }
+const processEnv = (globalForProcess.process as { env: Record<string, string> }).env;
+
+/* ---------------- chiave predefinita (nessuna digitazione) -----------
+ * Le chiavi dichiarate al build in un file .env (VITE_*) diventano le
+ * "chiavi d'ambiente" del bridge: l'Oracolo parte gia attivo senza aprire
+ * il dialogo. ATTENZIONE: in una build statica queste chiavi sono leggibili
+ * nel bundle; per un sito pubblico usare le variabili d'ambiente di Render
+ * (GROQ_API_KEY e simili), che restano solo sul server. */
+const VITE_ENV_MAP: Record<string, string> = {
+  VITE_GROQ_API_KEY: "GROQ_API_KEY",
+  VITE_CLOUDFLARE_API_TOKEN: "CLOUDFLARE_API_TOKEN",
+  VITE_CLOUDFLARE_ACCOUNT_ID: "CLOUDFLARE_ACCOUNT_ID",
+  VITE_OPENROUTER_API_KEY: "OPENROUTER_API_KEY",
+  VITE_GEMINI_API_KEY: "GEMINI_API_KEY",
+  VITE_OPENAI_API_KEY: "OPENAI_API_KEY",
+  VITE_ANTHROPIC_API_KEY: "ANTHROPIC_API_KEY",
+  VITE_PERPLEXITY_API_KEY: "PERPLEXITY_API_KEY",
+  VITE_GROQ_MODEL: "GROQ_MODEL",
+  VITE_CLOUDFLARE_MODEL: "CLOUDFLARE_MODEL",
+};
+
+function applyViteDefaults(): void {
+  const viteEnv = (import.meta as unknown as { env?: Record<string, string | undefined> }).env ?? {};
+  for (const [viteKey, envKey] of Object.entries(VITE_ENV_MAP)) {
+    const value = viteEnv[viteKey];
+    if (typeof value === "string" && value.trim() && !processEnv[envKey]) {
+      processEnv[envKey] = value.trim();
+    }
+  }
+}
 
 /* ------------------------------ storage ------------------------------ */
 const STATE_KEY = (sid: string) => `mythos:state:${sid}`;
@@ -133,11 +163,11 @@ function toPublic(state: StoredState): PersistedState {
 
 /* ------------------------------- /api/* ------------------------------ */
 const VALID_ACTIONS: QueryActionKey[] = [
-  "opening", "who", "anecdote", "origin", "episode", "relation", "relation_deep", "cause",
+  "opening", "who", "etymology", "anecdote", "origin", "episode", "relation", "relation_deep", "cause",
 ];
-const NEEDS_ONE: QueryActionKey[] = ["who", "anecdote", "origin", "episode"];
+const NEEDS_ONE: QueryActionKey[] = ["who", "etymology", "anecdote", "origin", "episode"];
 const NEEDS_TWO: QueryActionKey[] = ["relation", "relation_deep", "cause"];
-const USER_PROVIDERS: LlmKind[] = ["perplexity", "anthropic", "openai", "gemini", "openrouter", "groq", "custom"];
+const USER_PROVIDERS: LlmKind[] = ["perplexity", "anthropic", "openai", "gemini", "openrouter", "groq", "cloudflare", "custom"];
 
 async function loadUserConfig(sid: string | null): Promise<UserLlmConfig | null> {
   if (!sid || !SID_RE.test(sid)) return null;
@@ -422,6 +452,7 @@ const LLM_HOST_LABEL: Record<string, string> = {
   "api.perplexity.ai": "PERPLEXITY",
   "openrouter.ai": "OPENROUTER",
   "api.groq.com": "GROQ",
+  "api.cloudflare.com": "CLOUDFLARE",
 };
 
 /* --------- relay CORS opzionale (mai attivo di default) ---------------
@@ -588,6 +619,8 @@ function installFetchBridge(): void {
   flaggedWindow.__mythosBridgeInstalled = true;
 
   console.info(`[mythos] bridge locale ATTIVO · build: ${MYTHOS_BRIDGE_BUILD}`);
+
+  applyViteDefaults();
 
   setupRelayFlag();
 

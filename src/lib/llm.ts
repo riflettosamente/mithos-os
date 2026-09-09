@@ -1,4 +1,5 @@
 import { kernelQuery } from "./kernel";
+import { inferEntityKind } from "./types";
 import type { EntityKind, OracleResult, QueryActionKey } from "./types";
 
 /* ================================================================== */
@@ -8,9 +9,19 @@ import type { EntityKind, OracleResult, QueryActionKey } from "./types";
 /*  Senza chiavi -> kernel procedurale di emergenza (mai muto).         */
 /* ================================================================== */
 
-export type LlmKind = "perplexity" | "anthropic" | "openai" | "gemini" | "openrouter" | "groq" | "custom";
+export type LlmKind =
+  | "perplexity"
+  | "anthropic"
+  | "openai"
+  | "gemini"
+  | "openrouter"
+  | "groq"
+  | "cloudflare"
+  | "custom";
 
-export const LLM_KINDS: LlmKind[] = ["perplexity", "anthropic", "openai", "gemini", "openrouter", "groq", "custom"];
+export const LLM_KINDS: LlmKind[] = [
+  "perplexity", "anthropic", "openai", "gemini", "openrouter", "groq", "cloudflare", "custom",
+];
 
 export const LLM_KIND_LABEL: Record<LlmKind, string> = {
   perplexity: "Perplexity Sonar · ricerca web live",
@@ -19,6 +30,7 @@ export const LLM_KIND_LABEL: Record<LlmKind, string> = {
   gemini: "Google Gemini · google search",
   openrouter: "OpenRouter · modello :online",
   groq: "Groq · inferenza velocissima, free tier",
+  cloudflare: "Cloudflare Workers AI · fallback giornaliero gratuito",
   custom: "Endpoint personalizzato OpenAI-compatibile",
 };
 
@@ -94,6 +106,11 @@ const ACTION_SPECS: Record<
     words: "150-280",
     needs: 1,
     describe: (a) => `Racconta chi è ${a}: identità, genealogia, attributi, dominio, culto, epiteti e il gesto mitico più celebre che lo riguarda.`,
+  },
+  etymology: {
+    words: "140-240",
+    needs: 1,
+    describe: (a) => `Spiega l'etimologia di ${a}: forma italiana, nome in greco antico con grafia e traslitterazione, radice linguistica, significato letterale, eventuali interpretazioni antiche e moderne e rapporto prudente tra il nome e il mito. Distingui chiaramente le etimologie documentate da quelle controverse o popolari, senza inventare certezze.`,
   },
   anecdote: {
     words: "150-280",
@@ -275,7 +292,8 @@ function normalize(parsed: Record<string, unknown>): Omit<OracleResult, "engine"
     if (!nome || seenE.has(nome.toLowerCase())) continue;
     seenE.add(nome.toLowerCase());
     const tipoRaw = typeof o.tipo === "string" ? o.tipo.toLowerCase().trim() : "";
-    const kind = (KIND_SET.has(tipoRaw) ? tipoRaw : "mortale") as EntityKind;
+    const claimed = (KIND_SET.has(tipoRaw) ? tipoRaw : undefined) as EntityKind | undefined;
+    const kind = inferEntityKind(nome, claimed);
     entities.push({ name: nome, kind });
   }
   const tagRe = /\[\[([^\]|]{2,60})\]\]/g;
@@ -284,7 +302,7 @@ function normalize(parsed: Record<string, unknown>): Omit<OracleResult, "engine"
     const n = m[1].trim();
     if (n && !seenE.has(n.toLowerCase())) {
       seenE.add(n.toLowerCase());
-      entities.push({ name: n, kind: "mortale" });
+      entities.push({ name: n, kind: inferEntityKind(n) });
     }
   }
 
@@ -869,6 +887,49 @@ function buildProvider(kind: LlmKind, msgs: ChatMsg[], key: string, model?: stri
         }],
       };
     }
+    case "cloudflare": {
+      /* Workers AI: endpoint OpenAI-compatibile per account.
+       * L'ID account arriva dall'ambiente (server) o dal campo URL del
+       * dialogo. Fallback gratuito con 10.000 Neurons al giorno. */
+      const account =
+        (url && !/^https?:\/\//i.test(url) ? url.trim() : "") ||
+        env("CLOUDFLARE_ACCOUNT_ID") ||
+        "";
+      if (!account) return null;
+      return {
+        id: `CLOUDFLARE WORKERS AI · ${(model || "auto").trim()}`,
+        asks: [async () => {
+          const base = `https://api.cloudflare.com/client/v4/accounts/${account}/ai/v1`;
+          const headers = { Authorization: `Bearer ${key}` };
+          const failures: string[] = [];
+          const candidates = await chooseCloudflareModel(base, headers, model);
+
+          for (const candidateModel of candidates) {
+            const attempts: Record<string, unknown>[] = [
+              { model: candidateModel, messages: msgs, temperature: 0.7, max_tokens: 2000, response_format: { type: "json_object" } },
+              { model: candidateModel, messages: msgs, temperature: 0.7, max_tokens: 2000 },
+            ];
+            for (const body of attempts) {
+              try {
+                return await postChat(msgs, `${base}/chat/completions`, headers, body);
+              } catch (error) {
+                const message = error instanceof Error ? error.message : String(error);
+                failures.push(`${candidateModel}: ${message}`);
+                console.warn(`[oracolo] Cloudflare · ${candidateModel}: ${message}`);
+                if (/HTTP 401\b|HTTP 403\b/.test(message)) {
+                  throw new Error(httpCategory("401", message, "CLOUDFLARE"));
+                }
+                /* 429 con i Neurons esauriti: cambia modello, a volte il
+                   limite è per modello e non per account. */
+              }
+            }
+          }
+          const first = failures[0] ?? "nessun errore dettagliato";
+          const firstStatus = /^.*?HTTP (\d{3})/.exec(first)?.[1] ?? "";
+          throw new Error(httpCategory(firstStatus, first, "CLOUDFLARE"));
+        }],
+      };
+    }
     case "custom": {
       if (!url) return null;
       return {
@@ -879,6 +940,59 @@ function buildProvider(kind: LlmKind, msgs: ChatMsg[], key: string, model?: stri
       };
     }
   }
+}
+
+/* -------------------- selezione dinamica Cloudflare -------------------- */
+
+const CLOUDFLARE_FALLBACK_MODELS = [
+  "@cf/meta/llama-3.3-70b-instruct",
+  "@cf/qwen/qwen3-30b-a3b-fp8",
+  "@cf/meta/llama-3.1-8b-instruct",
+  "@cf/mistralai/mistral-small-3.1-24b-instruct",
+];
+
+function cloudflareModelScore(id: string): number {
+  const l = id.toLowerCase();
+  if (l.includes("embed") || l.includes("rerank") || l.includes("whisper") || l.includes("flux")) return -100;
+  if (l.includes("resnet") || l.includes("bge") || l.includes("m2m100")) return -100;
+  let s = 50;
+  if (l.includes("llama-3.3-70b")) s += 80;
+  if (l.includes("llama-3.1-8b")) s += 45;
+  if (l.includes("qwen")) s += 40;
+  if (l.includes("mistral")) s += 35;
+  if (l.includes("gpt-oss")) s += 30;
+  if (l.includes("70b")) s += 15;
+  if (l.includes("preview") || l.includes("beta")) s -= 20;
+  return s;
+}
+
+async function chooseCloudflareModel(
+  base: string,
+  headers: Record<string, string>,
+  configured?: string,
+): Promise<string[]> {
+  const explicit = (configured ?? "").trim();
+  const out: string[] = explicit ? [explicit] : [];
+  try {
+    const res = await fetch(`${base}/models`, {
+      headers,
+      signal: AbortSignal.timeout(15_000),
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = (await res.json()) as { data?: { id?: unknown }[] };
+    const ranked = (Array.isArray(data.data) ? data.data : [])
+      .map((item) => (typeof item.id === "string" ? item.id : ""))
+      .filter(Boolean)
+      .map((id) => ({ id, score: cloudflareModelScore(id) }))
+      .filter((item) => item.score > 0)
+      .sort((a, b) => b.score - a.score)
+      .map((item) => item.id);
+    out.push(...ranked);
+  } catch (error) {
+    console.warn("[oracolo] catalogo Cloudflare non raggiungibile", error);
+    out.push(...CLOUDFLARE_FALLBACK_MODELS);
+  }
+  return [...new Set(out)].slice(0, 4);
 }
 
 /* ----------------------- rilevamento ambiente ----------------------- */
@@ -895,18 +1009,21 @@ const ENV_KEYS: Record<LlmKind, string[]> = {
   gemini: ["GEMINI_API_KEY", "GOOGLE_API_KEY"],
   openrouter: ["OPENROUTER_API_KEY"],
   groq: ["GROQ_API_KEY"],
+  cloudflare: ["CLOUDFLARE_API_TOKEN"],
   custom: ["ORACLE_LLM_KEY"],
 };
 const ENV_MODEL: Record<LlmKind, string> = {
   perplexity: "PERPLEXITY_MODEL", anthropic: "ANTHROPIC_MODEL", openai: "OPENAI_MODEL",
   gemini: "GEMINI_MODEL", openrouter: "OPENROUTER_MODEL", groq: "GROQ_MODEL",
-  custom: "ORACLE_LLM_MODEL",
+  cloudflare: "CLOUDFLARE_MODEL", custom: "ORACLE_LLM_MODEL",
 };
 
 export function envHas(kind: LlmKind): boolean {
   const key = ENV_KEYS[kind].map(env).find(Boolean);
   if (!key) return false;
   if (kind === "custom" && !env("ORACLE_LLM_URL")) return false;
+  /* Workers AI richiede anche l'ID account per comporre l'endpoint. */
+  if (kind === "cloudflare" && !env("CLOUDFLARE_ACCOUNT_ID")) return false;
   return true;
 }
 

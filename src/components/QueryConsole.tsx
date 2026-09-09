@@ -1,7 +1,7 @@
 "use client";
 
 import {
-  CornerUpLeft, Drama, Factory, HelpCircle, Hourglass, MessagesSquare, Network, Repeat2, ScrollText, X,
+  CornerUpLeft, Drama, Factory, HelpCircle, Hourglass, Languages, MessagesSquare, Network, Repeat2, ScrollText, X,
 } from "lucide-react";
 import type { QueryActionKey } from "@/lib/types";
 import { sfx } from "@/lib/sound";
@@ -16,6 +16,7 @@ interface Cmd {
 
 const COMMANDS: Cmd[] = [
   { key: "who", needs: 1, icon: HelpCircle, make: (a) => `Racconta chi è: ${a}` },
+  { key: "etymology", needs: 1, icon: Languages, make: (a) => `Etimologia di: ${a}` },
   { key: "origin", needs: 1, icon: Factory, make: (a) => `Chi ha costruito / Da dove proviene: ${a}` },
   { key: "anecdote", needs: 1, icon: MessagesSquare, make: (a) => `Racconta un aneddoto mitologico su: ${a}` },
   { key: "episode", needs: 1, icon: ScrollText, make: (a) => `Narra il passo mitologico di: ${a}` },
@@ -99,7 +100,7 @@ export default function QueryConsole({
           </button>
         </div>
 
-        {/* i sette comandi */}
+        {/* gli otto comandi */}
         <div className="grid grid-cols-1 gap-1.5 sm:grid-cols-2 lg:grid-cols-3 2xl:grid-cols-4">
           {COMMANDS.map((c) => {
             /*

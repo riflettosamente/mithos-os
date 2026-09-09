@@ -13,6 +13,7 @@ interface Cfg {
 const PROVIDER_OPTIONS: { value: string; label: string }[] = [
   { value: "openrouter", label: "OpenRouter (routing automatico / :online)" },
   { value: "groq", label: "Groq (LPU velocissima · free tier generoso)" },
+  { value: "cloudflare", label: "Cloudflare Workers AI (fallback giornaliero gratuito)" },
   { value: "openai", label: "OpenAI GPT (web search)" },
   { value: "perplexity", label: "Perplexity (Sonar · ricerca web live)" },
   { value: "anthropic", label: "Anthropic Claude (web search)" },
@@ -199,9 +200,14 @@ export default function ApiKeyDialog({
                 <p>
                   <Server size={13} className="mr-1 inline" />
                   SERVER: {cfg.env.length
-                    ? `chiavi d'ambiente attive (${cfg.env.join(", ")})`
-                    : "nessuna chiave d'ambiente"}
+                    ? `chiave predefinita attiva (${cfg.env.join(", ")})`
+                    : "nessuna chiave predefinita"}
                 </p>
+                {cfg.env.length > 0 && (
+                  <p className="font-bold text-[#17621c]">
+                    ✓ ORACOLO GIÀ ATTIVO — nessuna configurazione necessaria.
+                  </p>
+                )}
                 <p>
                   <KeyRound size={13} className="mr-1 inline" />
                   UTENTE: {cfg.session
@@ -253,7 +259,7 @@ export default function ApiKeyDialog({
               type="text"
               value={model}
               onChange={(e) => setModel(e.target.value)}
-              placeholder={provider === "perplexity" ? "sonar-pro" : provider === "anthropic" ? "claude-sonnet-4-5" : provider === "openai" ? "gpt-4.1" : provider === "gemini" ? "gemini-2.5-flash" : provider === "openrouter" ? "google/gemma-4-31b-it:free" : provider === "groq" ? "lascia vuoto: scelta auto dal catalogo" : "nome-modello"}
+              placeholder={provider === "perplexity" ? "sonar-pro" : provider === "anthropic" ? "claude-sonnet-4-5" : provider === "openai" ? "gpt-4.1" : provider === "gemini" ? "gemini-2.5-flash" : provider === "openrouter" ? "google/gemma-4-31b-it:free" : provider === "cloudflare" ? "@cf/meta/llama-3.3-70b-instruct" : provider === "groq" ? "lascia vuoto: scelta auto dal catalogo" : "nome-modello"}
               autoComplete="off"
               spellCheck={false}
             />
@@ -263,6 +269,26 @@ export default function ApiKeyDialog({
                 Se non hai accesso alle varianti :online lascia il campo vuoto: l&apos;app proverà automaticamente anche modelli compatibili.
                 Esempi: google/gemini-flash-1.5:online, meta-llama/llama-3.3-70b-instruct:free.
               </p>
+            )}
+
+            {provider === "cloudflare" && (
+              <>
+                <p className="sunk bg-[#e2ecff] p-2 font-vt text-[17px] leading-snug text-[#12275c]">
+                  Workers AI offre <b>10.000 Neurons al giorno</b> gratis. Serve un <b>API Token</b>
+                  (dash.cloudflare.com → My Profile → API Tokens) e l&apos;<b>ID account</b> mostrato
+                  nella barra laterale della dashboard. Modello consigliato: @cf/meta/llama-3.3-70b-instruct.
+                </p>
+                <label className="field-label">ID account Cloudflare (32 caratteri esadecimali)</label>
+                <input
+                  className="input90"
+                  type="text"
+                  value={url}
+                  onChange={(e) => setUrl(e.target.value)}
+                  placeholder="es. 023e105f4ecef8ad9ca31a8372d0c353"
+                  autoComplete="off"
+                  spellCheck={false}
+                />
+              </>
             )}
 
             {provider === "custom" && (

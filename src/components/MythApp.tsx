@@ -7,7 +7,7 @@ import {
 import type {
   BoardEntity, EntityKind, MythPage, OracleResult, PersistedState, QueryActionKey, RelationEdge,
 } from "@/lib/types";
-import { ACTION_LABEL } from "@/lib/types";
+import { ACTION_LABEL, inferEntityKind } from "@/lib/types";
 import { setSoundEnabled, sfx } from "@/lib/sound";
 import { fetchJson } from "@/lib/api";
 import BootScreen from "./BootScreen";
@@ -73,7 +73,7 @@ function reconcileEntities(data: OracleResult): { name: string; kind: EntityKind
   const byName = new Map<string, { name: string; kind: EntityKind }>();
   for (const e of data.entities ?? []) {
     const name = e.name.trim();
-    if (name) byName.set(name.toLocaleLowerCase("it"), { name, kind: e.kind });
+    if (name) byName.set(name.toLocaleLowerCase("it"), { name, kind: inferEntityKind(name, e.kind) });
   }
 
   const tagged = /\[\[([^\]|]{2,64})\]\]/g;
@@ -81,17 +81,24 @@ function reconcileEntities(data: OracleResult): { name: string; kind: EntityKind
   while ((match = tagged.exec(data.text)) !== null) {
     const name = match[1].trim();
     const key = name.toLocaleLowerCase("it");
-    if (name && !byName.has(key)) byName.set(key, { name, kind: "mortale" });
+    if (name && !byName.has(key)) byName.set(key, { name, kind: inferEntityKind(name) });
   }
 
   for (const rel of data.relations ?? []) {
     for (const name of [rel.from, rel.to]) {
       const clean = name.trim();
       const key = clean.toLocaleLowerCase("it");
-      if (clean && !byName.has(key)) byName.set(key, { name: clean, kind: "mortale" });
+      if (clean && !byName.has(key)) byName.set(key, { name: clean, kind: inferEntityKind(clean) });
     }
   }
   return [...byName.values()];
+}
+
+function repairPersistedKinds(entities: BoardEntity[]): BoardEntity[] {
+  return entities.map((entity) => {
+    const kind = inferEntityKind(entity.name, entity.kind);
+    return kind === entity.kind ? entity : { ...entity, kind };
+  });
 }
 
 interface Modal {
@@ -237,7 +244,7 @@ export default function MythApp() {
 
   /* ------------------------- interrogazione ------------------------- */
   const runQuery = useCallback(
-    async (action: QueryActionKey, a?: string, b?: string, opts?: { regenerateKernelOpening?: boolean }) => {
+    async (action: QueryActionKey, a?: string, b?: string, opts?: { replaceOpening?: "kernel" | "any" }) => {
       /*
        * Il ref è aggiornato subito, prima del prossimo render: un doppio
        * click non può avviare due richieste concorrenti. `loading` resta
@@ -286,14 +293,22 @@ export default function MythApp() {
         if ((newEntityCount > 0 || added > 0) && !flipped) setPulse(true);
 
         setPages((prev) => {
-          if (opts?.regenerateKernelOpening) {
-            /* chiave appena inserita: se PASSO 01 e ancora una overture del
-               kernel procedurale E l'Oracolo ha davvero risposto (non degradato),
-               sostituisci il passo iniziale SENZA spostare la posizione di lettura */
+          if (opts?.replaceOpening) {
+            /* Rigenerazione del PASSO 01 (chiave appena inserita o comando
+               manuale): sostituisce l'overture SENZA spostare la posizione di
+               lettura, SOLO se l'Oracolo ha davvero risposto (non degradato,
+               cosi una overture LLM non viene mai sovrascritta dal kernel).
+               "kernel" = solo se il passo 01 era procedurale (auto alla chiave);
+               "any" = sempre che sia una overture (comando manuale). */
+            const isKernelPage = prev[0]?.engine.includes("KERNEL") ?? false;
+            const replaceable =
+              opts.replaceOpening === "kernel"
+                ? isKernelPage
+                : true;
             if (
               prev.length > 0 &&
               prev[0].action === "opening" &&
-              prev[0].engine.includes("KERNEL") &&
+              replaceable &&
               !data.degraded
             ) {
               const replaced = [...prev];
@@ -360,8 +375,9 @@ export default function MythApp() {
   const startResume = useCallback(() => {
     const st = savedRef.current;
     if (st) {
-      entityKeysRef.current = new Set(st.entities.map((e) => e.name.toLocaleLowerCase("it")));
-      setEnts(st.entities);
+      const repairedEntities = repairPersistedKinds(st.entities);
+      entityKeysRef.current = new Set(repairedEntities.map((e) => e.name.toLocaleLowerCase("it")));
+      setEnts(repairedEntities);
       setRels(st.relations);
       setPages(st.pages);
       setIdx(Math.min(st.idx, st.pages.length - 1));
@@ -514,6 +530,24 @@ export default function MythApp() {
                     <KeyRound size={15} /> Configura chiave LLM…
                     <span className="menu-pop-hint">API KEY</span>
                   </button>
+                  {pages.length > 0 && pages[0].action === "opening" && (
+                    <>
+                      <div className="menu-sep" aria-hidden />
+                      <button
+                        className="menu-pop-row"
+                        role="menuitem"
+                        onClick={() => {
+                          setMenuOpen(false);
+                          sfx("click");
+                          degradedShown.current = false; // consenti l'avviso se l'oracolo è muto
+                          void runQuery("opening", undefined, undefined, { replaceOpening: "any" });
+                        }}
+                      >
+                        <ScrollText size={15} /> Rigenera overture…
+                        <span className="menu-pop-hint">PASSO 01</span>
+                      </button>
+                    </>
+                  )}
                   <div className="menu-sep" aria-hidden />
                   <button
                     className="menu-pop-row"
@@ -653,7 +687,7 @@ export default function MythApp() {
              dal kernel procedurale (spedizione iniziata senza chiave),
              la rigeneriamo con l'Oracolo LLM appena entrato in funzione */
           if (pages[0]?.action === "opening" && pages[0].engine.includes("KERNEL")) {
-            void runQuery("opening", undefined, undefined, { regenerateKernelOpening: true });
+            void runQuery("opening", undefined, undefined, { replaceOpening: "kernel" });
           }
         }}
       />

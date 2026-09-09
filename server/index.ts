@@ -85,11 +85,11 @@ const DATA_FILE = join(DATA_DIR, "mythos.json");
 
 const SID_RE = /^[\w-]{8,64}$/;
 const VALID_ACTIONS: QueryActionKey[] = [
-  "opening", "who", "anecdote", "origin", "episode", "relation", "relation_deep", "cause",
+  "opening", "who", "etymology", "anecdote", "origin", "episode", "relation", "relation_deep", "cause",
 ];
-const NEEDS_ONE: QueryActionKey[] = ["who", "anecdote", "origin", "episode"];
+const NEEDS_ONE: QueryActionKey[] = ["who", "etymology", "anecdote", "origin", "episode"];
 const NEEDS_TWO: QueryActionKey[] = ["relation", "relation_deep", "cause"];
-const USER_PROVIDERS: LlmKind[] = ["perplexity", "anthropic", "openai", "gemini", "openrouter", "groq", "custom"];
+const USER_PROVIDERS: LlmKind[] = ["perplexity", "anthropic", "openai", "gemini", "openrouter", "groq", "cloudflare", "custom"];
 
 /* ----------------------------- persistenza --------------------------- */
 interface LlmRecord {

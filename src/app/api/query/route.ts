@@ -11,10 +11,10 @@ export const maxDuration = 60;
 export const dynamic = "force-dynamic";
 
 const VALID: QueryActionKey[] = [
-  "opening", "who", "anecdote", "origin", "episode", "relation", "relation_deep", "cause",
+  "opening", "who", "etymology", "anecdote", "origin", "episode", "relation", "relation_deep", "cause",
 ];
 
-const NEEDS_ONE: QueryActionKey[] = ["who", "anecdote", "origin", "episode"];
+const NEEDS_ONE: QueryActionKey[] = ["who", "etymology", "anecdote", "origin", "episode"];
 const NEEDS_TWO: QueryActionKey[] = ["relation", "relation_deep", "cause"];
 
 interface Body {

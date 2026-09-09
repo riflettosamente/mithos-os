@@ -1,3 +1,4 @@
+import { inferEntityKind } from "./types";
 import type { EntityKind, EntityRef, OracleResult, QueryActionKey, RelationEdge } from "./types";
 
 /* ------------------------------------------------------------------ */
@@ -267,7 +268,7 @@ function collectEntities(text: string): EntityRef[] {
   let m: RegExpExecArray | null;
   while ((m = re.exec(text)) !== null) {
     const n = norm(m[1]);
-    if (!found.has(n)) found.set(n, { name: n, kind: ENT[n] ?? "mortale" });
+    if (!found.has(n)) found.set(n, { name: n, kind: inferEntityKind(n, ENT[n]) });
   }
   return [...found.values()];
 }
@@ -376,6 +377,48 @@ function causeText(a: string, b: string): string {
   return parts.join("\n\n");
 }
 
+interface EtymologyEntry {
+  greek: string;
+  transliteration: string;
+  meaning: string;
+  note?: string;
+}
+
+const ETYMOLOGY: Record<string, EtymologyEntry> = {
+  Caos: { greek: "Χάος", transliteration: "Cháos", meaning: "apertura, voragine, spazio spalancato", note: "È collegato al verbo greco chaíno, spalancarsi o sbadigliare." },
+  Gea: { greek: "Γαῖα", transliteration: "Gaîa", meaning: "Terra", note: "È una forma poetica e divina del nome greco della terra." },
+  Zeus: { greek: "Ζεύς", transliteration: "Zeús", meaning: "cielo luminoso o dio del cielo diurno", note: "Il nome risale alla radice indoeuropea ricostruita *dyēus; il genitivo greco è Diós." },
+  Era: { greek: "Ἥρα", transliteration: "Hḗra", meaning: "etimologia incerta", note: "Sono state proposte connessioni con l'idea di signora o con la stagione, ma nessuna è universalmente accettata." },
+  Poseidone: { greek: "Ποσειδῶν", transliteration: "Poseidôn", meaning: "etimologia discussa, forse signore o sposo della Terra", note: "Il nome è già attestato in miceneo e non possiede una spiegazione condivisa da tutti gli studiosi." },
+  Ade: { greek: "Ἅιδης", transliteration: "Háidēs", meaning: "l'invisibile", note: "L'interpretazione tradizionale lo collega a una radice del vedere preceduta da un elemento privativo." },
+  Demetra: { greek: "Δημήτηρ", transliteration: "Dēmḗtēr", meaning: "Madre Terra o Madre del grano", note: "Il secondo elemento è certamente mḗtēr, madre; il valore esatto del primo resta discusso." },
+  Atena: { greek: "Ἀθηνᾶ", transliteration: "Athēnâ", meaning: "etimologia pregreca o comunque incerta", note: "Il rapporto tra il nome della dea e quello di Atene è antichissimo, ma non è certo quale dei due abbia dato nome all'altro." },
+  Apollo: { greek: "Ἀπόλλων", transliteration: "Apóllōn", meaning: "etimologia incerta", note: "Le numerose spiegazioni antiche e moderne non hanno prodotto un consenso linguistico definitivo." },
+  Artemide: { greek: "Ἄρτεμις", transliteration: "Ártemis", meaning: "etimologia incerta, forse pregreca o anatolica", note: "Le associazioni antiche con integrità e sicurezza sono interpretazioni tradizionali, non certezze linguistiche." },
+  Afrodite: { greek: "Ἀφροδίτη", transliteration: "Aphrodítē", meaning: "tradizionalmente colei che nasce dalla spuma", note: "Il legame con aphrós, spuma, sostiene il mito della nascita marina, ma potrebbe essere un'etimologia popolare." },
+  Ermes: { greek: "Ἑρμῆς", transliteration: "Hermês", meaning: "forse legato a hérma, cumulo di pietre o cippo", note: "Il nome richiama gli erme, segnacoli posti lungo strade e confini, coerenti con il dio dei passaggi." },
+  Dioniso: { greek: "Διόνυσος", transliteration: "Diónysos", meaning: "nome di origine discussa", note: "Il primo elemento è spesso accostato a Zeus; il secondo viene tradizionalmente collegato al monte Nisa, la cui natura è mitica e incerta." },
+  Prometeo: { greek: "Προμηθεύς", transliteration: "Promētheús", meaning: "colui che pensa prima, il previdente", note: "Il nome si oppone narrativamente a quello del fratello Epimeteo." },
+  Epimeteo: { greek: "Ἐπιμηθεύς", transliteration: "Epimētheús", meaning: "colui che pensa dopo", note: "È il contrario parlante di Prometeo e ne anticipa il carattere imprudente." },
+  Eracle: { greek: "Ἡρακλῆς", transliteration: "Hēraklês", meaning: "gloria di Era", note: "È composto dal nome di Era e da kléos, gloria: un nome ironico per l'eroe perseguitato dalla dea." },
+  Odisseo: { greek: "Ὀδυσσεύς", transliteration: "Odysseús", meaning: "forse colui che è adirato o odiato", note: "L'Odissea stessa gioca sul verbo odýssomai, essere adirato o odiare; l'etimologia resta discussa." },
+  Edipo: { greek: "Οἰδίπους", transliteration: "Oidípous", meaning: "piede gonfio", note: "È composto da oidéō, gonfiarsi, e poús, piede, in riferimento alle caviglie trafitte del neonato." },
+  Pandora: { greek: "Πανδώρα", transliteration: "Pandṓra", meaning: "tutta doni o colei che ricevette tutti i doni", note: "Il nome unisce pân, tutto, e dôron, dono." },
+  Minotauro: { greek: "Μινώταυρος", transliteration: "Minṓtauros", meaning: "toro di Minosse", note: "È formato dal nome di Minosse e da taûros, toro." },
+  Medusa: { greek: "Μέδουσα", transliteration: "Médousa", meaning: "colei che protegge o governa", note: "È il participio femminile del verbo médō, proteggere, regnare o avere cura." },
+  Atlante: { greek: "Ἄτλας", transliteration: "Átlas", meaning: "colui che sostiene o sopporta", note: "È tradizionalmente collegato alla radice del verbo tláō, sopportare." },
+  Narciso: { greek: "Νάρκισσος", transliteration: "Nárkissos", meaning: "etimologia incerta", note: "L'accostamento a nárkē, torpore, è suggestivo e antico, ma potrebbe essere popolare; il nome potrebbe essere pregreco." },
+};
+
+function etymologyText(name: string): string {
+  const N = norm(name);
+  const entry = ETYMOLOGY[N];
+  if (!entry) {
+    return `Il nome [[${N}]] non possiede una scheda etimologica affidabile nel lessico offline del Kernel Sapienziale. Per non trasformare una somiglianza sonora in una falsa certezza, il kernel si limita a registrare che la forma italiana discende dalla tradizione greca e latina del nome. L'Oracolo LLM, quando disponibile, può confrontare lessici storici, forme dialettali e proposte filologiche, distinguendo le derivazioni documentate dalle etimologie popolari.`;
+  }
+  return `Il nome [[${N}]] corrisponde al greco antico ${entry.greek}, traslitterato ${entry.transliteration}. Il suo significato etimologico è «${entry.meaning}». ${entry.note ?? ""}\n\nNel mito il nome può illuminare il carattere o il destino di [[${N}]], ma una corrispondenza narrativa non dimostra da sola una derivazione linguistica: per questo il Kernel distingue il significato documentato dalle interpretazioni nate in seguito.`;
+}
+
 function openingText(): string {
   const chain = [
     findPath("Caos", "Urano"),
@@ -393,6 +436,7 @@ function openingText(): string {
 const TITLE_BY_ACTION: Record<QueryActionKey, (a?: string, b?: string) => string> = {
   opening: () => "Overture del Cosmo Greco",
   who: (a) => `Codice: ${a}`,
+  etymology: (a) => `Etimologia: ${a}`,
   anecdote: (a) => `Aneddoto: ${a}`,
   origin: (a) => `Origine: ${a}`,
   episode: (a) => `Passo epico: ${a}`,
@@ -408,6 +452,7 @@ export function kernelQuery(action: QueryActionKey, subject?: string, subject2?:
   switch (action) {
     case "opening": text = openingText(); break;
     case "who": text = whoText(a!); break;
+    case "etymology": text = etymologyText(a!); break;
     case "anecdote": text = anecdoteText(a!); break;
     case "origin": text = originText(a!); break;
     case "episode": text = episodeText(a!); break;
@@ -416,8 +461,8 @@ export function kernelQuery(action: QueryActionKey, subject?: string, subject2?:
     case "cause": text = causeText(a!, b!); break;
   }
   const entities = collectEntities(text);
-  if (a && !entities.some((e) => e.name === a)) entities.unshift({ name: a, kind: ENT[a] ?? "mortale" });
-  if (b && !entities.some((e) => e.name === b)) entities.unshift({ name: b, kind: ENT[b] ?? "mortale" });
+  if (a && !entities.some((e) => e.name === a)) entities.unshift({ name: a, kind: inferEntityKind(a, ENT[a]) });
+  if (b && !entities.some((e) => e.name === b)) entities.unshift({ name: b, kind: inferEntityKind(b, ENT[b]) });
   const used = new Set<string>();
   const relations: RelationEdge[] = [];
   const re = /\[\[([^\]]+)\]\]/g;
