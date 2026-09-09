@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ChevronUp,
-  Crown, Gem, Landmark, Maximize2, MapPin, Move, Shuffle, Skull, Sparkles, Swords, User,
+  Crosshair, Crown, Gem, Landmark, Maximize2, MapPin, Minus, Move, Plus, Shuffle, Skull, Sparkles, Swords, User,
 } from "lucide-react";
 import type { BoardEntity, EntityKind, RelationEdge } from "@/lib/types";
 import { KIND_META } from "@/lib/types";
@@ -21,6 +21,9 @@ const KIND_ICON: Record<EntityKind, typeof Crown> = {
 };
 
 const PAN_STEP = 240;
+const MIN_K = 0.22;
+const MAX_K = 2.2;
+const COMMIT_DEBOUNCE = 150; // ms: l'unico costo React a fine gestura
 
 function hashOf(s: string): number {
   let h = 0;
@@ -33,6 +36,8 @@ function noteRotation(name: string): number {
   return ((hashOf(name) % 7) - 3) * 0.9;
 }
 
+const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v));
+
 interface DrawnEdge {
   a: BoardEntity;
   b: BoardEntity;
@@ -40,6 +45,21 @@ interface DrawnEdge {
   key: string;
 }
 
+interface View {
+  k: number;
+  tx: number;
+  ty: number;
+}
+
+/*
+ * Bacheca a viewport trasformato: zoom (rotellina, pinch ctrl+wheel, pulsanti,
+ * tastiera) e pan (trascinamento dello sfondo) scrivono SOLO il transform del
+ * mondo — nessun re-render, nessun ricalcolo dei fili a ogni frame.
+ * Il drag di una scheda è anch'esso imperativo: la targhetta si muove con la
+ * proprietà CSS `translate` (componibile col rotate di .note) e solo i fili
+ * INCIDENTI vengono aggiornati via DOM; a fine drag onMove() impegna la nuova
+ * posizione nello stato, e il ricalcolo completo dei path avviene UNA volta.
+ */
 export default function Corkboard({
   entities,
   relations,
@@ -57,23 +77,38 @@ export default function Corkboard({
   onTidy: () => void;
   onNodeQuery: (name: string) => void;
 }) {
-  const vpRef = useRef<HTMLDivElement>(null);
-  const canvasRef = useRef<HTMLDivElement>(null);
-  const [canvasSize, setCanvasSize] = useState({ w: 800, h: 500 });
-  const [canPan, setCanPan] = useState({ x: false, y: false });
-  const [atTop, setAtTop] = useState(true);
-  const atTopRef = useRef(true);
+  const stageRef = useRef<HTMLDivElement>(null);
+  const worldElRef = useRef<HTMLDivElement>(null);
+  const [dims, setDims] = useState({ vw: 900, vh: 520 });
   const [drag, setDrag] = useState<string | null>(null);
   const [hotEdge, setHotEdge] = useState<string | null>(null);
   const [freshNames, setFreshNames] = useState<Set<string>>(new Set());
   const seenNamesRef = useRef(new Set<string>());
   const freshTimerRef = useRef<number | null>(null);
-  const dragInfo = useRef<{ name: string; dx: number; dy: number } | null>(null);
+
+  /* vista impegnata (solo per UI: %, pulsanti) e vista viva nei ref */
+  const [view, setView] = useState<View>({ k: 1, tx: 0, ty: 0 });
+  const viewRef = useRef<View>({ k: 1, tx: 0, ty: 0 });
+  const metricsRef = useRef({ vw: 900, vh: 520, ww: 900, wh: 520 });
+  const interactingRef = useRef(false);
+  const fittedRef = useRef(false);
+  const animRafRef = useRef(0);
+  const commitTimerRef = useRef<number | null>(null);
+
+  const dragInfo = useRef<{
+    name: string; lower: string;
+    startClientX: number; startClientY: number;
+    startPinX: number; startPinY: number;
+    curX: number; curY: number;
+    el: HTMLElement;
+  } | null>(null);
+  const panInfo = useRef<{ x0: number; y0: number; tx0: number; ty0: number } | null>(null);
+
+  /* registri DOM per l'aggiornamento imperativo dei fili */
+  const edgeReg = useRef(new Map<string, SVGGElement>());
 
   /*
-   * Dimensione LOGICA, dipendente solo dal numero di cartellini.
-   * Non dipende più dal clientWidth del viewport: la comparsa delle
-   * scrollbar non può quindi innescare un ciclo di resize.
+   * Dimensione LOGICA del mondo, dipendente solo dal numero di cartellini.
    */
   const { baseW, baseH } = useMemo(() => {
     const count = Math.max(entities.length, 1);
@@ -85,68 +120,212 @@ export default function Corkboard({
     };
   }, [entities.length]);
 
-  /*
-   * Misura la tela renderizzata (che può essere più grande del minimo per
-   * riempire MAPPA.EXE). Aggiorna React solo quando i valori cambiano:
-   * nessun render per ogni frame di scroll e nessun ResizeObserver loop.
-   */
+  const world = useMemo(
+    () => ({ w: Math.max(dims.vw, baseW), h: Math.max(dims.vh, baseH) }),
+    [dims, baseW, baseH]
+  );
+
+  /* misura il palco (mai la tela: il transform non cambia il layout) */
   useEffect(() => {
-    const vpEl = vpRef.current;
-    const canvasEl = canvasRef.current;
-    if (!vpEl || !canvasEl) return;
+    const el = stageRef.current;
+    if (!el) return;
     let raf = 0;
     const measure = () => {
       window.cancelAnimationFrame(raf);
       raf = window.requestAnimationFrame(() => {
-        const w = Math.round(canvasEl.offsetWidth);
-        const h = Math.round(canvasEl.offsetHeight);
-        setCanvasSize((old) => (old.w === w && old.h === h ? old : { w, h }));
-        const nextPan = { x: w > vpEl.clientWidth + 2, y: h > vpEl.clientHeight + 2 };
-        setCanPan((old) => old.x === nextPan.x && old.y === nextPan.y ? old : nextPan);
+        const w = Math.round(el.clientWidth);
+        const h = Math.round(el.clientHeight);
+        setDims((old) => (old.vw === w && old.vh === h ? old : { vw: w, vh: h }));
       });
     };
     const ro = new ResizeObserver(measure);
-    ro.observe(vpEl);
-    ro.observe(canvasEl);
+    ro.observe(el);
     measure();
     return () => {
       ro.disconnect();
       window.cancelAnimationFrame(raf);
     };
-  }, [baseW, baseH]);
+  }, []);
 
-  const cw = canvasSize.w;
-  const ch = canvasSize.h;
-  const canX = canPan.x;
-  const canY = canPan.y;
+  const applyView = useCallback(() => {
+    const v = viewRef.current;
+    const el = worldElRef.current;
+    if (el) el.style.transform = `translate3d(${v.tx.toFixed(2)}px, ${v.ty.toFixed(2)}px, 0) scale(${v.k.toFixed(4)})`;
+  }, []);
 
-  /* durante lo scroll si aggiorna solo quando cambia lo stato top/non-top */
-  const onScroll = useCallback(() => {
-    const el = vpRef.current;
+  const clampV = useCallback((v: View): View => {
+    const m = metricsRef.current;
+    const cw = m.ww * v.k;
+    const ch = m.wh * v.k;
+    const margin = 160;
+    let { tx, ty } = v;
+    tx = cw <= m.vw ? (m.vw - cw) / 2 : clamp(tx, m.vw - cw - margin, margin);
+    ty = ch <= m.vh ? (m.vh - ch) / 2 : clamp(ty, m.vh - ch - margin, margin);
+    return { k: v.k, tx, ty };
+  }, []);
+
+  const syncView = useCallback(() => {
+    const c = clampV(viewRef.current);
+    viewRef.current = c;
+    applyView();
+    setView((old) =>
+      Math.abs(old.k - c.k) < 0.001 && Math.abs(old.tx - c.tx) < 0.5 && Math.abs(old.ty - c.ty) < 0.5 ? old : c
+    );
+  }, [applyView, clampV]);
+
+  const scheduleCommit = useCallback(() => {
+    if (commitTimerRef.current !== null) window.clearTimeout(commitTimerRef.current);
+    commitTimerRef.current = window.setTimeout(() => {
+      commitTimerRef.current = null;
+      syncView();
+    }, COMMIT_DEBOUNCE);
+  }, [syncView]);
+
+  const tweenTo = useCallback((to: View, dur = 260) => {
+    window.cancelAnimationFrame(animRafRef.current);
+    const from = { ...viewRef.current };
+    const target = clampV(to);
+    const t0 = performance.now();
+    const step = (t: number) => {
+      const p = Math.min(1, (t - t0) / dur);
+      const e = 1 - Math.pow(1 - p, 3); // ease-out cubica
+      viewRef.current = {
+        k: from.k + (target.k - from.k) * e,
+        tx: from.tx + (target.tx - from.tx) * e,
+        ty: from.ty + (target.ty - from.ty) * e,
+      };
+      applyView();
+      if (p < 1) animRafRef.current = window.requestAnimationFrame(step);
+      else syncView();
+    };
+    animRafRef.current = window.requestAnimationFrame(step);
+  }, [applyView, clampV, syncView]);
+
+  const computeFit = useCallback((): View => {
+    const m = metricsRef.current;
+    const k = clamp(Math.min(m.vw / m.ww, m.vh / m.wh) * 0.97, MIN_K, 1);
+    return { k, tx: (m.vw - m.ww * k) / 2, ty: (m.vh - m.wh * k) / 2 };
+  }, []);
+
+  const zoomAt = useCallback((clientX: number, clientY: number, factor: number) => {
+    const el = stageRef.current;
     if (!el) return;
-    const next = el.scrollTop <= 2;
-    if (next !== atTopRef.current) {
-      atTopRef.current = next;
-      setAtTop(next);
-    }
-  }, []);
+    const rect = el.getBoundingClientRect();
+    const mx = clientX - rect.left;
+    const my = clientY - rect.top;
+    const v = viewRef.current;
+    const k = clamp(v.k * factor, MIN_K, MAX_K);
+    const s = k / v.k;
+    viewRef.current = clampV({ k, tx: mx - (mx - v.tx) * s, ty: my - (my - v.ty) * s });
+    applyView();
+    scheduleCommit();
+  }, [applyView, clampV, scheduleCommit]);
 
-  const pan = useCallback((dx: number, dy: number) => {
-    sfx("click");
-    vpRef.current?.scrollBy({ left: dx, top: dy, behavior: "smooth" });
-  }, []);
+  const zoomBy = useCallback((factor: number) => {
+    const el = stageRef.current;
+    if (!el) return;
+    const r = el.getBoundingClientRect();
+    zoomAt(r.left + r.width / 2, r.top + r.height / 2, factor);
+  }, [zoomAt]);
+
+  const zoomTo100 = useCallback(() => {
+    const m = metricsRef.current;
+    tweenTo({ k: 1, tx: (m.vw - m.ww) / 2, ty: (m.vh - m.wh) / 2 });
+  }, [tweenTo]);
+
+  const fitView = useCallback((animate = true) => {
+    const t = computeFit();
+    if (animate) tweenTo(t);
+    else { viewRef.current = t; applyView(); syncView(); }
+  }, [applyView, computeFit, syncView, tweenTo]);
 
   const center = useCallback(() => {
-    sfx("flip");
-    const el = vpRef.current;
-    if (!el) return;
-    el.scrollTo({
-      left: Math.max(0, (cw - el.clientWidth) / 2),
-      top: Math.max(0, (ch - el.clientHeight) / 2),
-      behavior: "smooth",
-    });
-  }, [cw, ch]);
+    const m = metricsRef.current;
+    const k = viewRef.current.k;
+    tweenTo({ k, tx: m.vw / 2 - (m.ww / 2) * k, ty: m.vh / 2 - (m.wh / 2) * k });
+  }, [tweenTo]);
 
+  /* world + metriche nei ref per i gestori nativi stabili */
+  useEffect(() => {
+    metricsRef.current = { vw: dims.vw, vh: dims.vh, ww: world.w, wh: world.h };
+    if (!fittedRef.current && entities.length > 0 && dims.vw > 0) {
+      fittedRef.current = true;
+      viewRef.current = clampV(computeFit());
+      applyView();
+      syncView();
+      return;
+    }
+    if (!interactingRef.current) syncView();
+  }, [dims, world, entities.length, applyView, clampV, computeFit, syncView]);
+
+  /* rotellina e pinch: listener nativo passivo=false per poter fare
+   * preventDefault (zoom ancorato al cursore; shift+rotellina = pan orizz.) */
+  useEffect(() => {
+    const el = stageRef.current;
+    if (!el) return;
+    const onWheel = (ev: WheelEvent) => {
+      ev.preventDefault();
+      const unit = ev.deltaMode === 1 ? 16 : 1;
+      if (ev.shiftKey && !ev.ctrlKey && !ev.metaKey) {
+        viewRef.current = clampV({ ...viewRef.current, tx: viewRef.current.tx - ev.deltaY * unit });
+        applyView();
+        scheduleCommit();
+        return;
+      }
+      const raw = Math.exp(-ev.deltaY * unit * 0.0022);
+      const factor = raw > 1 ? Math.min(1.22, raw) : Math.max(0.82, raw);
+      zoomAt(ev.clientX, ev.clientY, factor);
+    };
+    el.addEventListener("wheel", onWheel, { passive: false });
+    return () => el.removeEventListener("wheel", onWheel);
+  }, [applyView, clampV, scheduleCommit, zoomAt]);
+
+  /* ------- pan sullo sfondo (trascinamento) ------- */
+  const onStagePointerDown = (ev: React.PointerEvent) => {
+    if (dragInfo.current) return; // già trascinamento scheda
+    if (ev.button !== 0 && ev.button !== 1) return;
+    if ((ev.target as Element).closest(".note")) return;
+    if (ev.button === 1) ev.preventDefault();
+    interactingRef.current = true;
+    const v = viewRef.current;
+    panInfo.current = { x0: ev.clientX, y0: ev.clientY, tx0: v.tx, ty0: v.ty };
+    ev.currentTarget.setPointerCapture(ev.pointerId);
+    ev.currentTarget.classList.add("panning");
+  };
+
+  const onStagePointerMove = (ev: React.PointerEvent) => {
+    const p = panInfo.current;
+    if (!p) return;
+    viewRef.current = clampV({ ...viewRef.current, tx: p.tx0 + (ev.clientX - p.x0), ty: p.ty0 + (ev.clientY - p.y0) });
+    applyView();
+  };
+
+  const onStagePointerUp = (ev: React.PointerEvent) => {
+    if (!panInfo.current) return;
+    panInfo.current = null;
+    interactingRef.current = false;
+    ev.currentTarget.classList.remove("panning");
+    ev.currentTarget.releasePointerCapture?.(ev.pointerId);
+    syncView();
+  };
+
+  /* ------- tastiera: accessibilità e controllo fino ------- */
+  const onStageKeyDown = (ev: React.KeyboardEvent) => {
+    const v = viewRef.current;
+    const step = PAN_STEP;
+    switch (ev.key) {
+      case "ArrowUp": ev.preventDefault(); tweenTo({ ...v, ty: v.ty + step }, 140); break;
+      case "ArrowDown": ev.preventDefault(); tweenTo({ ...v, ty: v.ty - step }, 140); break;
+      case "ArrowLeft": ev.preventDefault(); tweenTo({ ...v, tx: v.tx + step }, 140); break;
+      case "ArrowRight": ev.preventDefault(); tweenTo({ ...v, tx: v.tx - step }, 140); break;
+      case "+": case "=": ev.preventDefault(); zoomBy(1.25); break;
+      case "-": case "_": ev.preventDefault(); zoomBy(0.8); break;
+      case "0": ev.preventDefault(); fitView(); break;
+      case "1": ev.preventDefault(); zoomTo100(); break;
+    }
+  };
+
+  /* ------- geometria dei nodi (coordinate LOGICHE, non touchate dallo zoom) ------- */
   const entByLower = useMemo(() => {
     const m = new Map<string, BoardEntity>();
     for (const e of entities) m.set(e.name.toLowerCase(), e);
@@ -170,43 +349,54 @@ export default function Corkboard({
     return [...acc.values()];
   }, [relations, entByLower]);
 
+  /* indice dei fili per nodo: durante il drag aggiorno SOLO questi (culling) */
+  const incident = useMemo(() => {
+    const m = new Map<string, Array<{ key: string; endpoint: "a" | "b" }>>();
+    for (const ed of edges) {
+      for (const side of ["a", "b"] as const) {
+        const lower = ed[side].name.toLowerCase();
+        const arr = m.get(lower) ?? [];
+        arr.push({ key: ed.key, endpoint: side });
+        m.set(lower, arr);
+      }
+    }
+    return m;
+  }, [edges]);
+
   const selSet = useMemo(() => new Set(selected.map((s) => s.toLowerCase())), [selected]);
 
   /* normalizza anche le vecchie posizioni salvate vicino ai bordi */
   const anchorPct = useCallback(
     (e: BoardEntity) => {
-      const minX = (72 / cw) * 100;
+      const minX = (72 / world.w) * 100;
       const maxX = 100 - minX;
-      const minY = (14 / ch) * 100;
-      const maxY = 100 - (90 / ch) * 100;
+      const minY = (14 / world.h) * 100;
+      const maxY = 100 - (90 / world.h) * 100;
       return {
         x: Math.min(maxX, Math.max(minX, e.x)),
         y: Math.min(maxY, Math.max(minY, e.y)),
       };
     },
-    [cw, ch]
+    [world]
   );
 
   /*
    * Punto d'aggancio esatto = origine CSS della targhetta.
    * left/top rappresentano direttamente il centro della puntina, mentre
-   * il foglietto ruota intorno a quel punto (transform-origin: 50% 0).
-   * Il nodo SVG e la puntina condividono quindi le stesse coordinate per
-   * costruzione, senza approssimazioni dipendenti da altezza o rotazione.
+   * il foglietto ruota intorno a quel punto. Il nodo SVG e la puntina
+   * condividono le stesse coordinate per costruzione.
    */
   const toPin = useCallback(
     (e: BoardEntity) => {
       const p = anchorPct(e);
-      return { x: (p.x / 100) * cw, y: (p.y / 100) * ch };
+      return { x: (p.x / 100) * world.w, y: (p.y / 100) * world.h };
     },
-    [anchorPct, cw, ch]
+    [anchorPct, world]
   );
 
   /*
-   * Sincronizzazione visiva ORACOLO → MAPPA:
-   * individua solo i nomi realmente nuovi, li evidenzia e prepara il
-   * viewport sull'ultima scoperta. Quando l'utente gira la lavagna, il
-   * cartellino appena creato è già al centro della finestra MAPPA.EXE.
+   * Sincronizzazione visiva ORACOLO → MAPPA: i nomi nuovi vengono centrati
+   * nel viewport a prescindere dallo zoom in corso.
    */
   useEffect(() => {
     const next = new Set(entities.map((e) => e.name.toLocaleLowerCase("it")));
@@ -217,69 +407,125 @@ export default function Corkboard({
     setFreshNames(new Set(added.map((e) => e.name.toLocaleLowerCase("it"))));
     const newest = added[added.length - 1];
     const pin = toPin(newest);
-    window.requestAnimationFrame(() => {
-      const el = vpRef.current;
-      if (!el) return;
-      el.scrollTo({
-        left: Math.max(0, pin.x - el.clientWidth / 2),
-        top: Math.max(0, pin.y - el.clientHeight / 2),
-        behavior: "auto",
-      });
-    });
+    const m = metricsRef.current;
+    const k = viewRef.current.k;
+    viewRef.current = clampV({ k, tx: m.vw / 2 - pin.x * k, ty: m.vh / 2 - pin.y * k });
+    applyView();
+    syncView();
     if (freshTimerRef.current !== null) window.clearTimeout(freshTimerRef.current);
     freshTimerRef.current = window.setTimeout(() => {
       setFreshNames(new Set());
       freshTimerRef.current = null;
     }, 30000);
-  }, [entities, toPin]);
+  }, [entities, toPin, applyView, clampV, syncView]);
 
   useEffect(() => () => {
     if (freshTimerRef.current !== null) window.clearTimeout(freshTimerRef.current);
+    window.cancelAnimationFrame(animRafRef.current);
+    if (commitTimerRef.current !== null) window.clearTimeout(commitTimerRef.current);
   }, []);
 
+  /* ------- drag scheda: imperativo, con commit unico a fine gesto ------- */
   const startDrag = (ev: React.PointerEvent, e: BoardEntity) => {
     if (ev.button !== 0) return;
-    const rect = canvasRef.current!.getBoundingClientRect();
-    const anchor = anchorPct(e);
+    const pin = toPin(e);
+    interactingRef.current = true;
     dragInfo.current = {
       name: e.name,
-      dx: (anchor.x / 100) * rect.width - (ev.clientX - rect.left),
-      dy: (anchor.y / 100) * rect.height - (ev.clientY - rect.top),
+      lower: e.name.toLowerCase(),
+      startClientX: ev.clientX,
+      startClientY: ev.clientY,
+      startPinX: pin.x,
+      startPinY: pin.y,
+      curX: pin.x,
+      curY: pin.y,
+      el: ev.currentTarget as HTMLElement,
     };
     setDrag(e.name);
-    (ev.target as HTMLElement).setPointerCapture(ev.pointerId);
+    (ev.currentTarget as HTMLElement).setPointerCapture(ev.pointerId);
     sfx("drag");
     ev.preventDefault();
+    ev.stopPropagation();
   };
 
   const moveDrag = (ev: React.PointerEvent) => {
     const info = dragInfo.current;
     if (!info) return;
-    const rect = canvasRef.current!.getBoundingClientRect();
-    const padX = (72 / rect.width) * 100;
-    const padTop = (14 / rect.height) * 100;
-    const padBottom = (90 / rect.height) * 100;
-    const x = ((ev.clientX - rect.left + info.dx) / rect.width) * 100;
-    const y = ((ev.clientY - rect.top + info.dy) / rect.height) * 100;
-    onMove(
-      info.name,
-      Math.min(100 - padX, Math.max(padX, x)),
-      Math.min(100 - padBottom, Math.max(padTop, y))
-    );
+    const k = viewRef.current.k;
+    /* delta schermo → delta mondo; il confine della tela è in px logici */
+    const rawX = info.startPinX + (ev.clientX - info.startClientX) / k;
+    const rawY = info.startPinY + (ev.clientY - info.startClientY) / k;
+    const x = clamp(rawX, 72, world.w - 72);
+    const y = clamp(rawY, 14, world.h - 90);
+    info.curX = x;
+    info.curY = y;
+
+    /* la targhetta si sposta con la proprietà `translate` (niente reflow) */
+    info.el.style.translate = `${(x - info.startPinX).toFixed(1)}px ${(y - info.startPinY).toFixed(1)}px`;
+
+    /* solo i fili incidenti: endpoint e cappio seguono il dito, frame per frame */
+    const links = incident.get(info.lower);
+    if (links) {
+      for (const { key, endpoint } of links) {
+        const g = edgeReg.current.get(key);
+        if (!g) continue;
+        const line = g.querySelector("line");
+        if (!line) continue;
+        line.setAttribute(endpoint === "a" ? "x1" : "x2", String(x));
+        line.setAttribute(endpoint === "a" ? "y1" : "y2", String(y));
+        const knots = g.querySelectorAll("circle");
+        const knot = knots[endpoint === "a" ? 0 : 1];
+        if (knot) {
+          knot.setAttribute("cx", String(x));
+          knot.setAttribute("cy", String(y));
+        }
+        const text = g.querySelector("text");
+        if (text && knots.length >= 2) {
+          const otherX = Number(endpoint === "a" ? knots[1].getAttribute("cx") : knots[0].getAttribute("cx"));
+          const otherY = Number(endpoint === "a" ? knots[1].getAttribute("cy") : knots[0].getAttribute("cy"));
+          text.setAttribute("x", String((x + otherX) / 2));
+          text.setAttribute("y", String((y + otherY) / 2 - 6));
+        }
+      }
+    }
   };
 
   const endDrag = (ev: React.PointerEvent) => {
-    if (!dragInfo.current) return;
-    (ev.target as HTMLElement).releasePointerCapture?.(ev.pointerId);
+    const info = dragInfo.current;
+    if (!info) return;
+    info.el.releasePointerCapture?.(ev.pointerId);
     dragInfo.current = null;
+    interactingRef.current = false;
     setDrag(null);
+    /* UNICO ricalcolo React dei path, a fine drag */
+    onMove(info.name, (info.curX / world.w) * 100, (info.curY / world.h) * 100);
+    /* l'offset live si spegne solo dopo il commit di React: mai un frame di
+       sovrapposizione fra vecchia left/top e translate azzerata */
+    const el = info.el;
+    window.requestAnimationFrame(() => {
+      if (el.isConnected) el.style.translate = "";
+    });
   };
+
+  const dblZoom = (ev: React.MouseEvent) => {
+    if ((ev.target as Element).closest(".note")) return;
+    sfx("click");
+    zoomAt(ev.clientX, ev.clientY, 1.35);
+  };
+
+  const kPct = Math.round(view.k * 100);
+  const canX = world.w * view.k > dims.vw + 4;
+  const canY = world.h * view.k > dims.vh + 4;
 
   return (
     <div className="relative flex min-h-0 min-w-0 flex-1 flex-col">
       {/* toolbar della bacheca */}
       <div className="raised mb-1 flex flex-wrap items-center gap-2 bg-[#c9c9c9] px-2 py-1">
-        <span className="sunk inline-flex items-center gap-2 bg-[#3a2c12] px-2 py-0.5 font-silk text-[9px] tracking-[0.14em] text-[#ffd7a0] uppercase">
+        <span
+          className="sunk inline-flex items-center gap-2 bg-[#3a2c12] px-2 py-0.5 font-silk text-[9px] tracking-[0.14em] text-[#ffd7a0] uppercase"
+          data-tip="rotellina o ± : zoom · trascina lo sfondo o le frecce : sposta la visuale · doppio clic sullo sfondo : avvicina"
+          data-tip-pos="bottom-start"
+        >
           <Move size={11} /> Bacheca investigativa
         </span>
         <span className="sunk inline-flex items-center bg-white px-2 py-0.5 font-vt text-lg">
@@ -292,43 +538,80 @@ export default function Corkboard({
         )}
         {(canX || canY) && (
           <span className="sunk hidden items-center bg-white px-2 py-0.5 font-vt text-lg sm:inline-flex">
-            AREA {cw}×{ch}
+            AREA {world.w}×{world.h}
           </span>
         )}
         <div className="ml-auto flex items-center gap-2">
-          {(canX || canY) && (
-            <button className="btn90 !px-2 !py-1" onClick={center} data-tip="Centra la visuale sulla lavagna" data-tip-pos="bottom">
-              <Maximize2 size={13} /> Centra
+          {/* cluster zoom */}
+          <div className="sunk flex items-center bg-[#d4d4d4]" data-tip="Zoom: rotellina sul punto da inquadrare" data-tip-pos="bottom">
+            <button
+              className="px-1.5 py-1 font-silk text-[11px] hover:bg-[#e8e8e8] active:bg-[#b8b8b8]"
+              onClick={() => { sfx("click"); zoomBy(0.8); }}
+              aria-label="Riduci zoom"
+            >
+              <Minus size={12} />
             </button>
-          )}
+            <button
+              className="min-w-[54px] px-1 py-1 font-vt text-lg leading-none tabular-nums hover:bg-[#e8e8e8] active:bg-[#b8b8b8]"
+              onClick={() => { sfx("click"); zoomTo100(); }}
+              data-tip="Torna a scala reale (100%)"
+              data-tip-pos="bottom"
+            >
+              {kPct}%
+            </button>
+            <button
+              className="px-1.5 py-1 font-silk text-[11px] hover:bg-[#e8e8e8] active:bg-[#b8b8b8]"
+              onClick={() => { sfx("click"); zoomBy(1.25); }}
+              aria-label="Aumenta zoom"
+            >
+              <Plus size={12} />
+            </button>
+          </div>
+          <button className="btn90 !px-2 !py-1" onClick={() => { sfx("flip"); fitView(); }} data-tip="Inquadra tutta la lavagna (tasto 0)" data-tip-pos="bottom">
+            <Maximize2 size={13} /> Adatta
+          </button>
+          <button className="btn90 !px-2 !py-1" onClick={() => { sfx("flip"); center(); }} data-tip="Centra la visuale sulla lavagna" data-tip-pos="bottom">
+            <Crosshair size={13} /> Centra
+          </button>
           <button className="btn90 !px-2 !py-1" onClick={() => { sfx("flip"); onTidy(); }} data-tip="Riordina i nodi su una griglia leggibile" data-tip-pos="bottom-end">
             <Shuffle size={13} /> Auto-disponi
           </button>
         </div>
       </div>
 
-      {/* viewport con scorrimento interno confinato */}
+      {/* palco: viewport a transform, niente scrollbar native */}
       <div className="sunk relative min-h-0 min-w-0 flex-1 overflow-hidden">
-        <div ref={vpRef} className="board-viewport scroll90" onScroll={onScroll}>
+        <div
+          ref={stageRef}
+          className="board-stage"
+          role="application"
+          aria-label="Bacheca investigativa: zoom con la rotellina, pan trascinando lo sfondo"
+          tabIndex={0}
+          onPointerDown={onStagePointerDown}
+          onPointerMove={onStagePointerMove}
+          onPointerUp={onStagePointerUp}
+          onPointerCancel={onStagePointerUp}
+          onDoubleClick={dblZoom}
+          onKeyDown={onStageKeyDown}
+          onDragStart={(e) => e.preventDefault()}
+        >
           <div
-            ref={canvasRef}
-            className="corkboard relative"
-            style={{
-              width: `max(100%, ${baseW}px)`,
-              height: `max(100%, ${baseH}px)`,
-            }}
+            ref={worldElRef}
+            className="corkboard board-world"
+            style={{ width: world.w, height: world.h }}
             onPointerMove={moveDrag}
             onPointerUp={endDrag}
-            onPointerLeave={endDrag}
+            onPointerCancel={endDrag}
+            aria-label="tela della bacheca"
           >
             <div className="cork-grid" aria-hidden />
 
-            {/* fili SVG */}
+            {/* fili SVG — ogni <g> si registra per l'aggiornamento live */}
             <svg
               className="yarn-layer"
-              width="100%"
-              height="100%"
-              viewBox={`0 0 ${cw} ${ch}`}
+              width={world.w}
+              height={world.h}
+              viewBox={`0 0 ${world.w} ${world.h}`}
               preserveAspectRatio="none"
             >
               {edges.map((ed) => {
@@ -338,7 +621,13 @@ export default function Corkboard({
                 const mx = (pa.x + pb.x) / 2;
                 const my = (pa.y + pb.y) / 2;
                 return (
-                  <g key={ed.key}>
+                  <g
+                    key={ed.key}
+                    ref={(el) => {
+                      if (el) edgeReg.current.set(ed.key, el);
+                      else edgeReg.current.delete(ed.key);
+                    }}
+                  >
                     <line
                       className={`yarn ${hot ? "hot" : ""}`}
                       vectorEffect="non-scaling-stroke"
@@ -399,19 +688,25 @@ export default function Corkboard({
           </div>
         </div>
 
-        {/* targhetta del dossier — ancorata al viewport */}
+        {/* targhetta del dossier — ancorata al palco */}
         <div className="board-badge left-2 top-2 px-2 py-1 font-silk text-[9px] tracking-[0.2em] uppercase">
           F.R. 110 a.C. — DOSSIER MITO
         </div>
 
-        {/* cursore di scorrimento verso l'alto */}
+        {/* scorciatoia di pan verticale, quando serve */}
         {canY && (
-          <button className="pan-btn pan-u" onClick={() => pan(0, -PAN_STEP)} disabled={atTop} data-tip="Scorri in alto" data-tip-pos="bottom">
+          <button
+            className="pan-btn pan-u"
+            onClick={() => { sfx("click"); tweenTo({ ...viewRef.current, ty: viewRef.current.ty + PAN_STEP }, 160); }}
+            disabled={view.ty > -2}
+            data-tip="Scorri in alto"
+            data-tip-pos="bottom"
+          >
             <ChevronUp size={16} strokeWidth={3} />
           </button>
         )}
 
-        {/* leggenda — ancorata al viewport */}
+        {/* leggenda — ancorata al palco */}
         <div className="board-badge bottom-5 right-5 hidden gap-3 px-2 py-1 md:flex">
           {(Object.keys(KIND_META) as EntityKind[]).map((k) => (
             <span key={k} className="flex items-center gap-1 font-vt text-[15px] leading-none text-[#e8d9b8]">

@@ -1079,3 +1079,40 @@ img {
 .mono-mask {
   letter-spacing: 0.14em;
 }
+
+/* ================================================================
+   bacheca — palco a transform (zoom + pan senza scrollbar)
+   ================================================================ */
+.board-stage {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  touch-action: none;
+  user-select: none;
+  cursor: grab;
+  contain: strict; /* isola layout e paint della tela dal resto della UI */
+}
+
+.board-stage.panning {
+  cursor: grabbing;
+}
+
+.board-stage:focus-visible {
+  outline: 2px dashed #10106a;
+  outline-offset: -3px;
+}
+
+/* il mondo scalato/traslato: trasformato in GPU, mai in layout */
+.board-world {
+  position: absolute; /* vince su .corkboard perché definita dopo */
+  left: 0;
+  top: 0;
+  transform-origin: 0 0;
+  will-change: transform;
+}
+
+/* le schede non devono selezionare testo durante i gesti */
+.board-world .note {
+  -webkit-user-select: none;
+  user-select: none;
+}
