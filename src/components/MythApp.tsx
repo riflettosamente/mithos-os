@@ -7,6 +7,7 @@ import {
 import type {
   BoardEntity, EntityKind, MythPage, OracleResult, PersistedState, QueryActionKey, RelationEdge,
 } from "@/lib/types";
+import { clanLayout } from "@/lib/clan-layout";
 import { ACTION_LABEL, inferEntityKind } from "@/lib/types";
 import { setSoundEnabled, sfx } from "@/lib/sound";
 import { fetchJson } from "@/lib/api";
@@ -459,9 +460,22 @@ export default function MythApp() {
     setEnts((prev) => prev.map((e) => (e.name === name ? { ...e, x, y } : e)));
   }, []);
 
+  /*
+   * Auto-disponi per clan mitologici: le componenti connesse del grafo
+   * delle relazioni diventano gruppi (famiglie, cicli epici, faide), con
+   * il nodo piu' connesso al centro di ciascuno e gli altri in anelli.
+   * Cosi' i fili restano corti e la struttura del dossier si legge da sola.
+   */
   const onTidy = useCallback(() => {
-    setEnts((prev) => prev.map((e, i) => ({ ...e, ...layoutPos(i, prev.length) })));
-  }, []);
+    setEnts((prev) => {
+      if (prev.length === 0) return prev;
+      const laid = clanLayout(prev, rels);
+      return prev.map((e) => {
+        const p = laid.get(e.name.toLowerCase());
+        return p ? { ...e, x: p.x, y: p.y } : e;
+      });
+    });
+  }, [rels]);
 
   const navigate = useCallback((dir: -1 | 1) => {
     sfx("click");
@@ -565,7 +579,12 @@ export default function MythApp() {
             <button className="menu-item hover:!bg-[#000184]" onClick={() => { sfx("click"); onFlip(); }}>
               <RefreshCw size={14} /> Gira lavagna
             </button>
-            <button className="menu-item hover:!bg-[#000184]" onClick={() => { sfx("click"); onTidy(); }}>
+            <button
+              className="menu-item hover:!bg-[#000184]"
+              onClick={() => { sfx("click"); onTidy(); }}
+              data-tip="Raggruppa le entità per famiglie, cicli mitologici e relazioni"
+              data-tip-pos="bottom-start"
+            >
               <Shuffle size={14} /> Auto-disponi
             </button>
             <button className="menu-item ml-auto hover:!bg-[#000184]" onClick={toggleSound}>

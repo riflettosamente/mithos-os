@@ -89,7 +89,14 @@ export default function Corkboard({
   /* vista impegnata (solo per UI: %, pulsanti) e vista viva nei ref */
   const [view, setView] = useState<View>({ k: 1, tx: 0, ty: 0 });
   const viewRef = useRef<View>({ k: 1, tx: 0, ty: 0 });
-  const metricsRef = useRef({ vw: 900, vh: 520, ww: 900, wh: 520 });
+  /* Il "contenuto" e la vera tela: cresce con le schede, anche oltre i bordi
+   * del mondo base. Il clamp del pan e l'adatta usano questi estremi, cosi'
+   * una scheda trascinata fuori non diventa irraggiungibile. */
+  const metricsRef = useRef({
+    vw: 900,
+    vh: 520,
+    box: { minX: 0, minY: 0, maxX: 900, maxY: 520 },
+  });
   const interactingRef = useRef(false);
   const fittedRef = useRef(false);
   const animRafRef = useRef(0);
@@ -125,6 +132,25 @@ export default function Corkboard({
     [dims, baseW, baseH]
   );
 
+  /*
+   * Estremi reali del CONTENUTO in pixel logici: parte dalla tela base e si
+   * allarga quanto serve per contenere ogni scheda, anche trascinata oltre i
+   * bordi. E' la sola misura usata da clamp del pan e da "Adatta": la lavagna
+   * si comporta come una tela infinita.
+   */
+  const contentBox = useMemo(() => {
+    const box = { minX: 0, minY: 0, maxX: world.w, maxY: world.h };
+    for (const e of entities) {
+      const x = (e.x / 100) * world.w;
+      const y = (e.y / 100) * world.h;
+      if (x - 180 < box.minX) box.minX = x - 180;
+      if (x + 180 > box.maxX) box.maxX = x + 180;
+      if (y - 60 < box.minY) box.minY = y - 60;
+      if (y + 140 > box.maxY) box.maxY = y + 140;
+    }
+    return box;
+  }, [entities, world]);
+
   /* misura il palco (mai la tela: il transform non cambia il layout) */
   useEffect(() => {
     const el = stageRef.current;
@@ -155,12 +181,17 @@ export default function Corkboard({
 
   const clampV = useCallback((v: View): View => {
     const m = metricsRef.current;
-    const cw = m.ww * v.k;
-    const ch = m.wh * v.k;
+    const b = m.box;
+    const l = b.minX * v.k;
+    const r = b.maxX * v.k;
+    const t = b.minY * v.k;
+    const bo = b.maxY * v.k;
+    const cw = r - l;
+    const ch = bo - t;
     const margin = 160;
     let { tx, ty } = v;
-    tx = cw <= m.vw ? (m.vw - cw) / 2 : clamp(tx, m.vw - cw - margin, margin);
-    ty = ch <= m.vh ? (m.vh - ch) / 2 : clamp(ty, m.vh - ch - margin, margin);
+    tx = cw <= m.vw ? (m.vw - cw) / 2 - l : clamp(tx, m.vw - r - margin, -l + margin);
+    ty = ch <= m.vh ? (m.vh - ch) / 2 - t : clamp(ty, m.vh - bo - margin, -t + margin);
     return { k: v.k, tx, ty };
   }, []);
 
@@ -203,8 +234,11 @@ export default function Corkboard({
 
   const computeFit = useCallback((): View => {
     const m = metricsRef.current;
-    const k = clamp(Math.min(m.vw / m.ww, m.vh / m.wh) * 0.97, MIN_K, 1);
-    return { k, tx: (m.vw - m.ww * k) / 2, ty: (m.vh - m.wh * k) / 2 };
+    const b = m.box;
+    const w = b.maxX - b.minX;
+    const h = b.maxY - b.minY;
+    const k = clamp(Math.min(m.vw / w, m.vh / h) * 0.97, MIN_K, 1);
+    return { k, tx: (m.vw - w * k) / 2 - b.minX * k, ty: (m.vh - h * k) / 2 - b.minY * k };
   }, []);
 
   const zoomAt = useCallback((clientX: number, clientY: number, factor: number) => {
@@ -230,7 +264,12 @@ export default function Corkboard({
 
   const zoomTo100 = useCallback(() => {
     const m = metricsRef.current;
-    tweenTo({ k: 1, tx: (m.vw - m.ww) / 2, ty: (m.vh - m.wh) / 2 });
+    const b = m.box;
+    tweenTo({
+      k: 1,
+      tx: m.vw / 2 - ((b.minX + b.maxX) / 2),
+      ty: m.vh / 2 - ((b.minY + b.maxY) / 2),
+    });
   }, [tweenTo]);
 
   const fitView = useCallback((animate = true) => {
@@ -241,13 +280,18 @@ export default function Corkboard({
 
   const center = useCallback(() => {
     const m = metricsRef.current;
+    const b = m.box;
     const k = viewRef.current.k;
-    tweenTo({ k, tx: m.vw / 2 - (m.ww / 2) * k, ty: m.vh / 2 - (m.wh / 2) * k });
+    tweenTo({
+      k,
+      tx: m.vw / 2 - ((b.minX + b.maxX) / 2) * k,
+      ty: m.vh / 2 - ((b.minY + b.maxY) / 2) * k,
+    });
   }, [tweenTo]);
 
-  /* world + metriche nei ref per i gestori nativi stabili */
+  /* metriche (palco + estremi del contenuto) nei ref per i gestori stabili */
   useEffect(() => {
-    metricsRef.current = { vw: dims.vw, vh: dims.vh, ww: world.w, wh: world.h };
+    metricsRef.current = { vw: dims.vw, vh: dims.vh, box: contentBox };
     if (!fittedRef.current && entities.length > 0 && dims.vw > 0) {
       fittedRef.current = true;
       viewRef.current = clampV(computeFit());
@@ -256,7 +300,7 @@ export default function Corkboard({
       return;
     }
     if (!interactingRef.current) syncView();
-  }, [dims, world, entities.length, applyView, clampV, computeFit, syncView]);
+  }, [dims, contentBox, entities.length, applyView, clampV, computeFit, syncView]);
 
   /* rotellina e pinch: listener nativo passivo=false per poter fare
    * preventDefault (zoom ancorato al cursore; shift+rotellina = pan orizz.) */
@@ -365,20 +409,12 @@ export default function Corkboard({
 
   const selSet = useMemo(() => new Set(selected.map((s) => s.toLowerCase())), [selected]);
 
-  /* normalizza anche le vecchie posizioni salvate vicino ai bordi */
-  const anchorPct = useCallback(
-    (e: BoardEntity) => {
-      const minX = (72 / world.w) * 100;
-      const maxX = 100 - minX;
-      const minY = (14 / world.h) * 100;
-      const maxY = 100 - (90 / world.h) * 100;
-      return {
-        x: Math.min(maxX, Math.max(minX, e.x)),
-        y: Math.min(maxY, Math.max(minY, e.y)),
-      };
-    },
-    [world]
-  );
+  /*
+   * Nessun limite: la posizione salvata e' usata tal quale, anche oltre il
+   * 100% o in negativo. Gli estremi del contenuto (contentBox) crescono con
+   * le schede, quindi pan e "Adatta" le raggiungono sempre.
+   */
+  const anchorPct = useCallback((e: BoardEntity) => ({ x: e.x, y: e.y }), []);
 
   /*
    * Punto d'aggancio esatto = origine CSS della targhetta.
@@ -452,13 +488,29 @@ export default function Corkboard({
     const info = dragInfo.current;
     if (!info) return;
     const k = viewRef.current.k;
-    /* delta schermo → delta mondo; il confine della tela è in px logici */
-    const rawX = info.startPinX + (ev.clientX - info.startClientX) / k;
-    const rawY = info.startPinY + (ev.clientY - info.startClientY) / k;
-    const x = clamp(rawX, 72, world.w - 72);
-    const y = clamp(rawY, 14, world.h - 90);
+    /* delta schermo → delta mondo: la scheda segue il puntatore senza
+       alcun muro, anche oltre i bordi della tela base */
+    const x = info.startPinX + (ev.clientX - info.startClientX) / k;
+    const y = info.startPinY + (ev.clientY - info.startClientY) / k;
     info.curX = x;
     info.curY = y;
+
+    /* la vista insegue la scheda quando esce dal margine: la tela si
+       comporta come infinita e la scheda non resta mai fuori schermo */
+    const m = metricsRef.current;
+    const sx = x * k + viewRef.current.tx;
+    const sy = y * k + viewRef.current.ty;
+    const EDGE = 110;
+    let ntx = viewRef.current.tx;
+    let nty = viewRef.current.ty;
+    if (sx > m.vw - EDGE) ntx = m.vw - EDGE - x * k;
+    else if (sx < EDGE) ntx = EDGE - x * k;
+    if (sy > m.vh - EDGE) nty = m.vh - EDGE - y * k;
+    else if (sy < EDGE) nty = EDGE - y * k;
+    if (ntx !== viewRef.current.tx || nty !== viewRef.current.ty) {
+      viewRef.current = { k, tx: ntx, ty: nty };
+      applyView();
+    }
 
     /* la targhetta si sposta con la proprietà `translate` (niente reflow) */
     info.el.style.translate = `${(x - info.startPinX).toFixed(1)}px ${(y - info.startPinY).toFixed(1)}px`;
@@ -505,6 +557,9 @@ export default function Corkboard({
     window.requestAnimationFrame(() => {
       if (el.isConnected) el.style.translate = "";
     });
+    /* gli estremi del contenuto sono cambiati: riaggancia il clamp del pan
+       alla nuova estensione (il commit di React deve essere gia avvenuto) */
+    window.setTimeout(() => syncView(), 90);
   };
 
   const dblZoom = (ev: React.MouseEvent) => {
@@ -514,8 +569,8 @@ export default function Corkboard({
   };
 
   const kPct = Math.round(view.k * 100);
-  const canX = world.w * view.k > dims.vw + 4;
-  const canY = world.h * view.k > dims.vh + 4;
+  const canX = (contentBox.maxX - contentBox.minX) * view.k > dims.vw + 4;
+  const canY = (contentBox.maxY - contentBox.minY) * view.k > dims.vh + 4;
 
   return (
     <div className="relative flex min-h-0 min-w-0 flex-1 flex-col">
@@ -537,8 +592,12 @@ export default function Corkboard({
           </span>
         )}
         {(canX || canY) && (
-          <span className="sunk hidden items-center bg-white px-2 py-0.5 font-vt text-lg sm:inline-flex">
-            AREA {world.w}×{world.h}
+          <span
+            className="sunk hidden items-center bg-white px-2 py-0.5 font-vt text-lg sm:inline-flex"
+            data-tip="Estensione della tela: cresce quando trascini le schede oltre i bordi"
+            data-tip-pos="bottom"
+          >
+            AREA {Math.round(contentBox.maxX - contentBox.minX)}×{Math.round(contentBox.maxY - contentBox.minY)}
           </span>
         )}
         <div className="ml-auto flex items-center gap-2">
@@ -573,7 +632,18 @@ export default function Corkboard({
           <button className="btn90 !px-2 !py-1" onClick={() => { sfx("flip"); center(); }} data-tip="Centra la visuale sulla lavagna" data-tip-pos="bottom">
             <Crosshair size={13} /> Centra
           </button>
-          <button className="btn90 !px-2 !py-1" onClick={() => { sfx("flip"); onTidy(); }} data-tip="Riordina i nodi su una griglia leggibile" data-tip-pos="bottom-end">
+          <button
+            className="btn90 !px-2 !py-1"
+            onClick={() => {
+              sfx("flip");
+              onTidy();
+              /* i clan possono occupare piu' tela della griglia di prima:
+                 dopo il riposizionamento inquadra tutto il contenuto */
+              window.setTimeout(() => fitView(), 300);
+            }}
+            data-tip="Raggruppa le entità per famiglie, cicli mitologici e relazioni"
+            data-tip-pos="bottom-end"
+          >
             <Shuffle size={13} /> Auto-disponi
           </button>
         </div>

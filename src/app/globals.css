@@ -1091,6 +1091,8 @@ img {
   user-select: none;
   cursor: grab;
   contain: strict; /* isola layout e paint della tela dal resto della UI */
+  /* Il sughero vive sul palco e resta uniforme a qualsiasi zoom. */
+  background: url("/img/cork.jpg") center/512px repeat;
 }
 
 .board-stage.panning {
@@ -1109,6 +1111,23 @@ img {
   top: 0;
   transform-origin: 0 0;
   will-change: transform;
+  /* Il sughero è già sul palco: la tela non aggiunge gradiente o bordi. */
+  background: none;
+  box-shadow: none;
+  /* Tela infinita: le schede trascinate oltre i bordi restano visibili
+     (il palco, non la tela, è la finestra di ritaglio). */
+  overflow: visible;
+}
+
+/* i fili verso schede fuori dalla tela base non devono essere tagliati
+   dal viewBox dell'SVG */
+.board-world > svg.yarn-layer {
+  overflow: visible;
+}
+
+/* la griglia copre ampiamente anche l'area oltre i bordi della tela */
+.board-world .cork-grid {
+  inset: -6000px;
 }
 
 /* le schede non devono selezionare testo durante i gesti */
